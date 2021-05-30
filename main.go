@@ -25,11 +25,11 @@ func main() {
 	modelName, albumName := getAlbumInfo(pageSource)
 	imagesFound := crawlImages(pageSource)
 	
-	reg, err := regexp.Compile("[^a-zA-Z0-9]+")
+	reg, err := regexp.Compile("[^a-z A-Z 0-9]")
 	if err != nil {
 		log.Fatal(err)
 	}
-	processedString := reg.ReplaceAllString(albumName, "-")
+	processedString := reg.ReplaceAllString(albumName, "")
 	
 	fmt.Println("Found", processedString, "set from", modelName, "!")
 	fmt.Println("Found", len(imagesFound), "images in set. Downloading...")
