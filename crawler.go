@@ -1,7 +1,7 @@
 package main
 
 import (
-	"fmt"
+//	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -87,7 +87,7 @@ func getContents(link string) io.Reader {
 
 	u, _ := url.Parse(link)
 	jar.SetCookies(u, cookies)
-	fmt.Println(jar.Cookies(u))
+//	fmt.Println(jar.Cookies(u))
 
 	client := &http.Client{
 		Jar: jar,
