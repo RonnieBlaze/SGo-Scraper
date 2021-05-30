@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-
+	"log"
+	"regexp"
+	
 	"github.com/joho/godotenv"
 )
 
@@ -22,11 +24,17 @@ func main() {
 	pageSource := getContents(albumURL)
 	modelName, albumName := getAlbumInfo(pageSource)
 	imagesFound := crawlImages(pageSource)
-
-	fmt.Println("Found", albumName, "set from", modelName, "!")
+	
+	reg, err := regexp.Compile("[^a-zA-Z0-9]+")
+	if err != nil {
+		log.Fatal(err)
+	}
+	processedString := reg.ReplaceAllString(albumName, "")
+	
+	fmt.Println("Found", processedString, "set from", modelName, "!")
 	fmt.Println("Found", len(imagesFound), "images in set. Downloading...")
 
-	albumDir := downloadsDir + "/" + modelName + " - " + albumName
+	albumDir := downloadsDir + "/" + modelName + " - " + processedString
 
 	checkAndCreateDir(downloadsDir)
 	checkAndCreateDir(albumDir)
