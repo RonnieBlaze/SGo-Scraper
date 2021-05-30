@@ -10,7 +10,7 @@ Just run by appending the URL of the album.
 
 ## Usage
 ```
-git clone https://github.com/Osuka42g/SGo-Scraper.git
+git clone https://github.com/RonnieBlaze/SGo-Scraper.git
 cd SGo-Scraper
 go get
 cp .env.example .env
