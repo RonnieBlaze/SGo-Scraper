@@ -29,7 +29,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	processedString := reg.ReplaceAllString(albumName, "")
+	processedString := reg.ReplaceAllString(albumName, "-")
 	
 	fmt.Println("Found", processedString, "set from", modelName, "!")
 	fmt.Println("Found", len(imagesFound), "images in set. Downloading...")
