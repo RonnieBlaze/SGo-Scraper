@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"log"
 	"regexp"
+	"strings"
 	
 	"github.com/joho/godotenv"
 )
@@ -29,12 +30,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	processedString := reg.ReplaceAllString(albumName, "")
+	processedString := reg.ReplaceAllString(albumName, "-")
+	strTrimSpace := strings.TrimSpace(processedString)
 	
-	fmt.Println("Found", processedString, "set from", modelName, "!")
+	fmt.Println("Found", albumName, "set from", modelName, "!")
 	fmt.Println("Found", len(imagesFound), "images in set. Downloading...")
 
-	albumDir := downloadsDir + "/" + modelName + "/" + processedString
+	albumDir := downloadsDir + "/" + modelName + "/Albums/" + strTrimSpace
 
 	checkAndCreateDir(downloadsDir)
 	checkAndCreateDir(albumDir)
