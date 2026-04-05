@@ -42,7 +42,7 @@ func crawlImages(rawContents io.Reader) []string {
 	}
 }
 
-var albumLinkPattern = regexp.MustCompile(`^/girls/[^/]+/album/\d+/[^/]+/$`)
+var albumLinkPattern = regexp.MustCompile(`/(girls|members)/[^/]+/album/\d+/[^/]+/$`)
 
 func crawlAlbums(rawContents io.Reader) []string {
 	z := html.NewTokenizer(rawContents)
@@ -63,9 +63,20 @@ func crawlAlbums(rawContents io.Reader) []string {
 			if link == "" {
 				continue
 			}
-			if albumLinkPattern.MatchString(link) && !seen[link] {
+			// reject mailto, javascript, and any other non-HTTP links
+			if !strings.HasPrefix(link, "/") && !strings.HasPrefix(link, "https://www.suicidegirls.com") {
+				continue
+			}
+			if !albumLinkPattern.MatchString(link) {
+				continue
+			}
+			// normalize to absolute
+			if !strings.HasPrefix(link, "http") {
+				link = "https://www.suicidegirls.com" + link
+			}
+			if !seen[link] {
 				seen[link] = true
-				albumsFound = append(albumsFound, "https://www.suicidegirls.com"+link)
+				albumsFound = append(albumsFound, link)
 			}
 		}
 	}
