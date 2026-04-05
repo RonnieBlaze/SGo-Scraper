@@ -1,33 +1,23 @@
 package main
 
 import (
-    "bytes"
-    "fmt"
-    "io"
-    "os"
+	"bytes"
+	"fmt"
+	"io"
+	"os"
+	"strings"
 	"sync"
-    "github.com/joho/godotenv"
+
+	"github.com/joho/godotenv"
 )
 
-func main() {
-	err := godotenv.Load()
-	if err != nil {
-		panic(err)
-	}
-
-	downloadsDir := os.Getenv("DOWNLOADSDIR")
-	args := os.Args
-	albumURL := args[1]
-	finalizeWithZip := args[len(args)-1] == "-z"
-
+func downloadAlbum(albumURL string, downloadsDir string, finalizeWithZip bool) {
 	pageSource := getContents(albumURL)
-	// Read the body once into memory
 	rawBytes, err := io.ReadAll(pageSource)
 	if err != nil {
 		panic(err)
 	}
 
-	// Each function gets its own fresh reader from the same bytes
 	modelName, albumName := getAlbumInfo(bytes.NewReader(rawBytes))
 	imagesFound := crawlImages(bytes.NewReader(rawBytes))
 	albumDate, dateErr := getAlbumDate(bytes.NewReader(rawBytes))
@@ -36,21 +26,8 @@ func main() {
 	fmt.Println("Found", len(imagesFound), "images in set. Downloading...")
 
 	albumDir := downloadsDir + "/" + modelName + " - " + albumName
-
-	checkAndCreateDir(downloadsDir)
 	checkAndCreateDir(albumDir)
-	// imagesDownloaded := []string{}
 
-	// for i, imageURL := range imagesFound {
-		// imageOutput := albumDir + "/" + leftPad(strconv.Itoa(i), "0", digitsLen(len(imagesFound))-1) + ".jpg"
-		// imageOutput := albumDir + "/" + fmt.Sprintf("%03d", i) + ".jpg"
-		// fmt.Println(imageURL + " -> " + imageOutput)
-		// imagesDownloaded = append(imagesDownloaded, imageOutput)
-
-		// b, _ := saveImage(imageURL, imageOutput)
-		// fmt.Println("File size:", b)
-	// }
-	
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	imagesDownloaded := make([]string, len(imagesFound))
@@ -80,7 +57,6 @@ func main() {
 		fmt.Println("Warning: could not determine album date:", dateErr)
 	}
 
-
 	if finalizeWithZip {
 		err := ZipFiles(albumDir+"/"+albumName+".zip", imagesDownloaded)
 		if err != nil {
@@ -89,4 +65,28 @@ func main() {
 	}
 
 	fmt.Println("Done... Enjoy!")
+}
+
+func main() {
+	err := godotenv.Load()
+	if err != nil {
+		panic(err)
+	}
+
+	downloadsDir := os.Getenv("DOWNLOADSDIR")
+	args := os.Args
+	albumURL := args[1]
+	finalizeWithZip := args[len(args)-1] == "-z"
+
+	checkAndCreateDir(downloadsDir)
+
+	if strings.Contains(albumURL, "/photos/") {
+		albumLinks := getAllAlbumLinks(albumURL)
+		fmt.Println("Found", len(albumLinks), "albums")
+		for _, link := range albumLinks {
+			downloadAlbum(link, downloadsDir, finalizeWithZip)
+		}
+	} else {
+		downloadAlbum(albumURL, downloadsDir, finalizeWithZip)
+	}
 }

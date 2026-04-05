@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"regexp"
 
 	"golang.org/x/net/html"
 )
@@ -39,6 +40,62 @@ func crawlImages(rawContents io.Reader) []string {
 			}
 		}
 	}
+}
+
+var albumLinkPattern = regexp.MustCompile(`^/girls/[^/]+/album/\d+/[^/]+/$`)
+
+func crawlAlbums(rawContents io.Reader) []string {
+	z := html.NewTokenizer(rawContents)
+	albumsFound := []string{}
+	seen := map[string]bool{}
+
+	for {
+		tt := z.Next()
+		if tt == html.ErrorToken {
+			return albumsFound
+		}
+		if tt == html.StartTagToken {
+			t := z.Token()
+			if t.Data != "a" {
+				continue
+			}
+			link := getValueFromAttribute(t, "href")
+			if link == "" {
+				continue
+			}
+			if albumLinkPattern.MatchString(link) && !seen[link] {
+				seen[link] = true
+				albumsFound = append(albumsFound, "https://www.suicidegirls.com"+link)
+			}
+		}
+	}
+}
+
+func getAllAlbumLinks(modelURL string) []string {
+	allAlbums := []string{}
+	seen := map[string]bool{}
+	offset := 0
+
+	for {
+		pageURL := fmt.Sprintf("%s?partial=true&offset=%d", modelURL, offset)
+		pageSource := getContents(pageURL)
+		batch := crawlAlbums(pageSource)
+
+		if len(batch) == 0 {
+			break
+		}
+
+		for _, link := range batch {
+			if !seen[link] {
+				seen[link] = true
+				allAlbums = append(allAlbums, link)
+			}
+		}
+
+		offset += len(batch)
+	}
+
+	return allAlbums
 }
 
 func getTitle(rawContents io.Reader) string {
@@ -93,14 +150,20 @@ func getAlbumDate(rawContents io.Reader) (time.Time, error) {
 				z.Next()
 				text := strings.TrimSpace(z.Token().Data)
 				if text != "" {
-					return time.Parse("Jan 2, 2006", text)
+					// try full date first
+					if parsed, err := time.Parse("Jan 2, 2006", text); err == nil {
+						return parsed, nil
+					}
+					// fall back to no-year format, assume current year
+					if parsed, err := time.Parse("Jan 2", text); err == nil {
+						return parsed.AddDate(time.Now().Year(), 0, 0), nil
+					}
 				}
 			}
 		}
 	}
 	return time.Time{}, fmt.Errorf("date not found in page")
 }
-
 
 func getContents(link string) io.Reader {
 	sessionidCookie := os.Getenv("SESSIONIDTOKEN")
