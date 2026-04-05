@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/net/html"
 )
@@ -78,6 +79,28 @@ func sanitizeName(s string) string {
 	)
 	return strings.TrimSpace(replacer.Replace(s))
 }
+
+func getAlbumDate(rawContents io.Reader) (time.Time, error) {
+	z := html.NewTokenizer(rawContents)
+	for {
+		tt := z.Next()
+		if tt == html.ErrorToken {
+			break
+		}
+		if tt == html.StartTagToken {
+			t := z.Token()
+			if t.Data == "time" {
+				z.Next()
+				text := strings.TrimSpace(z.Token().Data)
+				if text != "" {
+					return time.Parse("Jan 2, 2006", text)
+				}
+			}
+		}
+	}
+	return time.Time{}, fmt.Errorf("date not found in page")
+}
+
 
 func getContents(link string) io.Reader {
 	sessionidCookie := os.Getenv("SESSIONIDTOKEN")

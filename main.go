@@ -30,6 +30,7 @@ func main() {
 	// Each function gets its own fresh reader from the same bytes
 	modelName, albumName := getAlbumInfo(bytes.NewReader(rawBytes))
 	imagesFound := crawlImages(bytes.NewReader(rawBytes))
+	albumDate, dateErr := getAlbumDate(bytes.NewReader(rawBytes))
 
 	fmt.Println("Found", albumName, "set from", modelName, "!")
 	fmt.Println("Found", len(imagesFound), "images in set. Downloading...")
@@ -70,6 +71,15 @@ func main() {
 	}
 
 	wg.Wait()
+
+	if dateErr == nil {
+		for _, imgPath := range imagesDownloaded {
+			os.Chtimes(imgPath, albumDate, albumDate)
+		}
+	} else {
+		fmt.Println("Warning: could not determine album date:", dateErr)
+	}
+
 
 	if finalizeWithZip {
 		err := ZipFiles(albumDir+"/"+albumName+".zip", imagesDownloaded)
