@@ -23,10 +23,37 @@ func leftPad(s string, padStr string, pLen int) string {
 	return strings.Repeat(padStr, pLen) + s
 }
 
+// func saveImage(url string, output string) (int64, error) {
+	// img, _ := os.Create(output)
+	// resp, _ := http.Get(url)
+	// return io.Copy(img, resp.Body)
+// }
+
 func saveImage(url string, output string) (int64, error) {
-	img, _ := os.Create(output)
-	resp, _ := http.Get(url)
-	return io.Copy(img, resp.Body)
+	resp, err := http.Get(url)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	img, err := os.Create(output)
+	if err != nil {
+		return 0, err
+	}
+	defer img.Close()
+
+	n, err := io.Copy(img, resp.Body)
+	if err != nil {
+		return n, err
+	}
+
+	if lastMod := resp.Header.Get("Last-Modified"); lastMod != "" {
+		if t, err := http.ParseTime(lastMod); err == nil {
+			os.Chtimes(output, t, t)
+		}
+	}
+
+	return n, nil
 }
 
 func ZipFiles(filename string, files []string) error {

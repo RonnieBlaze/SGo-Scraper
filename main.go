@@ -1,11 +1,12 @@
 package main
 
 import (
-	"fmt"
-	"os"
-	"strconv"
-
-	"github.com/joho/godotenv"
+    "bytes"
+    "fmt"
+    "io"
+    "os"
+	"sync"
+    "github.com/joho/godotenv"
 )
 
 func main() {
@@ -20,8 +21,15 @@ func main() {
 	finalizeWithZip := args[len(args)-1] == "-z"
 
 	pageSource := getContents(albumURL)
-	modelName, albumName := getAlbumInfo(pageSource)
-	imagesFound := crawlImages(pageSource)
+	// Read the body once into memory
+	rawBytes, err := io.ReadAll(pageSource)
+	if err != nil {
+		panic(err)
+	}
+
+	// Each function gets its own fresh reader from the same bytes
+	modelName, albumName := getAlbumInfo(bytes.NewReader(rawBytes))
+	imagesFound := crawlImages(bytes.NewReader(rawBytes))
 
 	fmt.Println("Found", albumName, "set from", modelName, "!")
 	fmt.Println("Found", len(imagesFound), "images in set. Downloading...")
@@ -30,16 +38,38 @@ func main() {
 
 	checkAndCreateDir(downloadsDir)
 	checkAndCreateDir(albumDir)
-	imagesDownloaded := []string{}
+	// imagesDownloaded := []string{}
+
+	// for i, imageURL := range imagesFound {
+		// imageOutput := albumDir + "/" + leftPad(strconv.Itoa(i), "0", digitsLen(len(imagesFound))-1) + ".jpg"
+		// imageOutput := albumDir + "/" + fmt.Sprintf("%03d", i) + ".jpg"
+		// fmt.Println(imageURL + " -> " + imageOutput)
+		// imagesDownloaded = append(imagesDownloaded, imageOutput)
+
+		// b, _ := saveImage(imageURL, imageOutput)
+		// fmt.Println("File size:", b)
+	// }
+	
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	imagesDownloaded := make([]string, len(imagesFound))
+	total := len(imagesFound)
 
 	for i, imageURL := range imagesFound {
-		imageOutput := albumDir + "/" + leftPad(strconv.Itoa(i), "0", digitsLen(len(imagesFound))-1) + ".jpg"
-		fmt.Println(imageURL + " -> " + imageOutput)
-		imagesDownloaded = append(imagesDownloaded, imageOutput)
+		wg.Add(1)
+		go func(i int, imageURL string) {
+			defer wg.Done()
+			imageOutput := albumDir + "/" + fmt.Sprintf("%03d", i) + ".jpg"
+			b, _ := saveImage(imageURL, imageOutput)
+			imagesDownloaded[i] = imageOutput
 
-		b, _ := saveImage(imageURL, imageOutput)
-		fmt.Println("File size:", b)
+			mu.Lock()
+			fmt.Printf("[%03d/%03d] %03d.jpg — %.2f MB\n", i+1, total, i, float64(b)/1024/1024)
+			mu.Unlock()
+		}(i, imageURL)
 	}
+
+	wg.Wait()
 
 	if finalizeWithZip {
 		err := ZipFiles(albumDir+"/"+albumName+".zip", imagesDownloaded)

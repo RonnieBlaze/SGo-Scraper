@@ -32,21 +32,12 @@ func crawlImages(rawContents io.Reader) []string {
 			if link == "" {
 				continue
 			}
-			hasProto := strings.Index(link, "https://") == 0 && strings.HasSuffix(link, ".jpg") == true
+			hasProto := strings.Index(link, "https://") == 0 && strings.Index(link, ".jpg") > 0
 			if hasProto {
 				imagesFound = append(imagesFound, link)
 			}
 		}
 	}
-}
-
-func getAlbumInfo(rawContents io.Reader) (modelName string, albumName string) {
-	title := getTitle(rawContents)
-	s := strings.Split(title, " Photo Album: ")
-	ss := strings.Split(s[1], " | SuicideGirls")
-	modelName = s[0]
-	albumName = ss[0]
-	return
 }
 
 func getTitle(rawContents io.Reader) string {
@@ -71,20 +62,44 @@ func getTitle(rawContents io.Reader) string {
 	}
 }
 
+func getAlbumInfo(rawContents io.Reader) (modelName string, albumName string) {
+	title := getTitle(rawContents)
+	s := strings.Split(title, " Photo Album: ")
+	ss := strings.Split(s[1], " | SuicideGirls")
+	modelName = sanitizeName(s[0])
+	albumName = sanitizeName(ss[0])
+	return
+}
+
+func sanitizeName(s string) string {
+	replacer := strings.NewReplacer(
+		"/", "-", "\\", "-", ":", "-", "*", "-",
+		"?", "", "\"", "", "<", "", ">", "", "|", "-",
+	)
+	return strings.TrimSpace(replacer.Replace(s))
+}
+
 func getContents(link string) io.Reader {
 	sessionidCookie := os.Getenv("SESSIONIDTOKEN")
+	sgcsrftoken := os.Getenv("SGCSRFTOKEN")
+	rsciVid := os.Getenv("RSCI_VID")
 
 	jar, _ := cookiejar.New(nil)
-	var cookies []*http.Cookie
-	cookie := &http.Cookie{
-		Name:   "sessid",
-		Value:  sessionidCookie,
-		Path:   "/",
-		Domain: "www.suicidegirls.com",
+	cookieData := []struct{ name, value string }{
+		{"sessid", sessionidCookie},
+		{"sgcsrftoken", sgcsrftoken},
+		{"rsci_vid", rsciVid},
 	}
 
-	cookies = append(cookies, cookie)
-
+	var cookies []*http.Cookie
+	for _, c := range cookieData {
+		cookies = append(cookies, &http.Cookie{
+			Name:   c.name,
+			Value:  c.value,
+			Path:   "/",
+			Domain: "www.suicidegirls.com",
+		})
+	}
 	u, _ := url.Parse(link)
 	jar.SetCookies(u, cookies)
 	fmt.Println(jar.Cookies(u))
@@ -94,7 +109,12 @@ func getContents(link string) io.Reader {
 	}
 
 	req, _ := http.NewRequest("GET", link, nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+	req.Header.Set("Referer", "https://www.suicidegirls.com/")
 	resp, err := client.Do(req)
+	fmt.Println(resp)
 
 	if err != nil {
 		panic(err)
