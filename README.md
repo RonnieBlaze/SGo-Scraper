@@ -1,7 +1,5 @@
-# Not maintaining this project anymore.
 
-### Feel free to fork and continue on your own
-
+### Vibe coding this fork. Bear with me.
 ===========
 
 # SGo-Scraper
@@ -22,7 +20,7 @@ go get
 cp .env.example .env
 ```
 
-Open `.env` and fill _SESSIONIDTOKEN_ with [your own Token](#getting-token).
+Open `.env` and fill _SESSIONIDTOKEN_ and others with [your own Tokens](#getting-token).
 
 ```
 go build
@@ -35,8 +33,8 @@ If you want to also compress the downloaded files, append `-z` at the end as arg
 1. Using Google Chrome, log in into your Suicide Girls account.
 2. Pop out the developers console and go to _Application_ tab.
 3. At the left, go to Storage -> Cookies -> https://suicidegirls.com
-4. Scroll down until you find _sessid_ cookie.
-5. Copy the value from _Value_ column.
+4. Scroll down until you find _sessid_, _rsci_vid_, and _sgcsrftoken_ cookies.
+5. Copy the values from _Value_ columns.
 
 ##### Why this is needed?
 In order to access to full albums, credentials to the site are required.
