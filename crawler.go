@@ -144,6 +144,7 @@ func sanitizeName(s string) string {
 	replacer := strings.NewReplacer(
 		"/", "-", "\\", "-", ":", "-", "*", "-",
 		"?", "", "\"", "", "<", "", ">", "", "|", "-",
+		".", "",
 	)
 	return strings.TrimSpace(replacer.Replace(s))
 }
