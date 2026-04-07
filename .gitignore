@@ -2,5 +2,6 @@ downloads
 SGo-Scraper
 .env
 txt
+html
 go.mod
 go.sum
