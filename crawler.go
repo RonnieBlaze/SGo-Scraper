@@ -241,10 +241,19 @@ type PageInfo struct {
 }
 
 // parsePageInfo parses the raw page title into a PageInfo.
-// Two known formats:
-//   Proper album: "Model - Photo Album Name | SuicideGirls"
-//   Candid post:  "PostName by Model | SuicideGirls"
+// Known formats:
+//   Proper album (new): "Model Photo Album: Name | SuicideGirls"
+//   Proper album (old): "Model - Photo Album Name | SuicideGirls"
+//   Candid post:        "PostName by Model | SuicideGirls"
 func parsePageInfo(rawTitle string) PageInfo {
+	// New format: "Reignausten Photo Album: Sea Foam Sweetie | SuicideGirls"
+	if idx := strings.Index(rawTitle, " Photo Album: "); idx != -1 {
+		model := strings.TrimSpace(rawTitle[:idx])
+		rest := rawTitle[idx+len(" Photo Album: "):]
+		name := strings.TrimSpace(strings.SplitN(rest, "|", 2)[0])
+		return PageInfo{ModelName: sanitizeName(model), AlbumName: sanitizeName(name), IsCandid: false}
+	}
+	// Old format: "Model - Photo Album Name | SuicideGirls"
 	if idx := strings.Index(rawTitle, " - Photo Album "); idx != -1 {
 		model := strings.TrimSpace(rawTitle[:idx])
 		rest := rawTitle[idx+len(" - Photo Album "):]
