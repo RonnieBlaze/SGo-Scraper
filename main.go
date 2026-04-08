@@ -35,8 +35,19 @@ func downloadAlbum(albumURL string, downloadsDir string, finalizeWithZip bool, i
 }
 
 // downloadProperAlbum saves a full photo set.
-// Destination: /photos/<ModelName> - <AlbumName>/
+// Destination: /photos/<Model> - <Album>/
+// File names:  <albumID> - <seq>.jpg
 func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downloadsDir string, finalizeWithZip bool) {
+	// Extract album ID from URL (segment after "/album/")
+	urlParts := strings.Split(strings.TrimSuffix(albumURL, "/"), "/")
+	albumID := ""
+	for i, p := range urlParts {
+		if p == "album" && i+1 < len(urlParts) {
+			albumID = urlParts[i+1]
+			break
+		}
+	}
+
 	imagesFound := crawlAlbumImages(bytes.NewReader(rawBytes))
 	albumDate, dateErr := getAlbumDate(bytes.NewReader(rawBytes))
 
@@ -54,7 +65,7 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 		wg.Add(1)
 		go func(i int, imageURL string) {
 			defer wg.Done()
-			imageOutput := albumDir + "/" + fmt.Sprintf("%04d", i+1) + ".jpg"
+			imageOutput := albumDir + "/" + albumID + " - " + fmt.Sprintf("%04d", i+1) + ".jpg"
 			b, _ := saveImage(imageURL, imageOutput)
 			imagesDownloaded[i] = imageOutput
 			mu.Lock()
@@ -82,12 +93,12 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 	fmt.Println("Done!")
 }
 
-// downloadCandidPost saves images from a candid post (one-image or multi-image).
+// downloadCandidPost saves images from a candid or blog post (one-image or multi-image).
 //
 // Structure:
 //
-//	One-image   → candids/<ModelName>/<postID> - <postName> - 0001.jpg  (flat)
-//	Multi-image → candids/<ModelName>/<postID> - <postName>/0001.jpg   (folder)
+//	One-image   -> candids/<Model>/<postID> - <postName> - 0001.jpg  (flat)
+//	Multi-image -> candids/<Model>/<postID> - <postName>/0001.jpg    (folder)
 func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloadsDir string) {
 	parts := strings.Split(strings.TrimSuffix(albumURL, "/"), "/")
 	postID := ""
@@ -172,96 +183,15 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 	wg.Wait()
 }
 
-// downloadBlogPost fetches a blog post page and saves all images it contains.
-//
-// Structure:
-//
-//	One-image   → candids/<ModelName>/<postID> - <postName> - 0001.jpg  (flat)
-//	Multi-image → candids/<ModelName>/<postID> - <postName>/0001.jpg   (folder)
-//
-// Two image formats are handled:
-//   - <a data-picture-url="...">  (older posts, parsed by crawlCandidImages)
-//   - <script type="x-custom-image"> with data-original="..." inside
-//     (newer posts; the tokenizer treats the script body as opaque text, so
-//     crawlBlogImagesRegex scans the raw bytes with a regexp instead)
+// downloadBlogPost routes a blog post URL through the standard candid pipeline.
+// Blog posts share the same /album/<id>/<slug>/ URL shape and image layout.
 func downloadBlogPost(postURL string, downloadsDir string) {
-	m := blogLinkPattern.FindStringSubmatch(postURL)
-	if m == nil {
-		fmt.Println("Warning: could not parse blog post URL:", postURL)
-		return
-	}
-
-	// Capitalize model name for directory use.
-	rawModel := sanitizeName(m[2])
-	modelName := rawModel
-	if modelName != "" {
-		modelName = strings.ToUpper(modelName[:1]) + modelName[1:]
-	}
-	postID := m[3]
-	parts := strings.Split(strings.TrimSuffix(postURL, "/"), "/")
-	urlSlug := sanitizeName(parts[len(parts)-1])
-
-	pageSource := getContents(postURL)
-	rawBytes, err := io.ReadAll(pageSource)
-	if err != nil {
-		fmt.Println("Warning: could not fetch blog post:", postURL, err)
-		return
-	}
-
-	// Use the actual page title as the post name; fall back to URL slug.
-	info := parsePageInfo(getTitle(bytes.NewReader(rawBytes)))
-	postName := info.PostName
-	if postName == "" {
-		postName = urlSlug
-	}
-
-	images := crawlCandidImages(bytes.NewReader(rawBytes))
-	if len(images) == 0 {
-		images = crawlBlogImagesRegex(rawBytes)
-	}
-	if len(images) == 0 {
-		fmt.Println("No images found in:", postURL)
-		return
-	}
-
-	modelDir := downloadsDir + "/candids/" + modelName
-	checkAndCreateDir(modelDir)
-
-	fmt.Printf("Blog post %s — %d image(s)\n", postName, len(images))
-
-	// One image → flat file, same convention as candid posts.
-	if len(images) == 1 {
-		imageOutput := fmt.Sprintf("%s/%s - %s - 0001.jpg", modelDir, postID, postName)
-		b, _ := saveImage(images[0], imageOutput)
-		fmt.Printf("[0001/0001] — %.2f MB\n", float64(b)/1024/1024)
-		return
-	}
-
-	// Multiple images → folder.
-	postDir := fmt.Sprintf("%s/%s - %s", modelDir, postID, postName)
-	checkAndCreateDir(postDir)
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	total := len(images)
-
-	for i, imageURL := range images {
-		wg.Add(1)
-		go func(i int, imageURL string) {
-			defer wg.Done()
-			imageOutput := fmt.Sprintf("%s/%s - %s - %04d.jpg", postDir, postID, postName, i+1)
-			b, _ := saveImage(imageURL, imageOutput)
-			mu.Lock()
-			fmt.Printf("[%04d/%04d] — %.2f MB\n", i+1, total, float64(b)/1024/1024)
-			mu.Unlock()
-		}(i, imageURL)
-	}
-
-	wg.Wait()
+	downloadAlbum(postURL, downloadsDir, false, true)
 }
 
 func main() {
-	if err := godotenv.Load(); err != nil {
+	err := godotenv.Load()
+	if err != nil {
 		panic(err)
 	}
 
@@ -274,63 +204,49 @@ func main() {
 	checkAndCreateDir(downloadsDir + "/photos")
 	checkAndCreateDir(downloadsDir + "/candids")
 
-	// modelNameFromURL returns the lowercase slug for URL-filter use only.
-	modelNameFromURL := func(u string) string {
-		parts := strings.Split(strings.TrimSuffix(u, "/"), "/")
-		for i, p := range parts {
-			if (p == "girls" || p == "members") && i+1 < len(parts) {
-				return parts[i+1]
-			}
-		}
-		return ""
-	}
-
 	switch {
 	case strings.Contains(albumURL, "/album/"):
+		// Single album/post page
 		downloadAlbum(albumURL, downloadsDir, finalizeWithZip, false)
 
 	case strings.Contains(albumURL, "/photos/"):
-		isCandid := strings.Contains(albumURL, "/photos/view/candids")
-		modelName := modelNameFromURL(albumURL)
-		albumLinks := getAllAlbumLinks(albumURL, modelName)
+		// All albums from a model's dedicated listing page.
+		// Extract modelName from URL path (e.g. /girls/lulumei/photos/...).
+		photoParts := strings.Split(strings.TrimSuffix(albumURL, "/"), "/")
+		photoModel := ""
+		for i, p := range photoParts {
+			if (p == "girls" || p == "members") && i+1 < len(photoParts) {
+				photoModel = photoParts[i+1]
+				break
+			}
+		}
+		albumLinks := getAllAlbumLinks(albumURL, photoModel)
 		fmt.Println("Found", len(albumLinks), "albums")
+		isCandid := strings.Contains(albumURL, "/candids/")
 		for _, link := range albumLinks {
 			downloadAlbum(link, downloadsDir, finalizeWithZip, isCandid)
 		}
 
 	default:
-		// Fetch the profile page once. For /members/ profiles that are SuicideGirls,
-		// the nav exposes a "girls/<name>/photos" link — resolveContentBase extracts
-		// that so photosets and candids use the correct /girls/ URL instead of 404ing
-		// on the /members/ equivalent.
-		profileSource := getContents(albumURL)
-		profileBytes, err := io.ReadAll(profileSource)
-		if err != nil {
-			panic(err)
-		}
-		contentBase := resolveContentBase(bytes.NewReader(profileBytes), albumURL)
-		modelName := modelNameFromURL(contentBase)
+		// Main model page — sweep dedicated listing pages, then paginated
+		// feed for blog posts only (feed album posts are already covered by
+		// the dedicated photosets page).
+		parts := strings.Split(strings.TrimSuffix(albumURL, "/"), "/")
+		modelName := parts[len(parts)-1]
 
-		fmt.Printf("Content base: %s (model: %s)\n", contentBase, modelName)
+		fmt.Printf("Content base: %s (model: %s)\n", albumURL, modelName)
 
-		// Proper photosets
-		albumLinks := getAllAlbumLinks(contentBase+"/photos/view=photosets/", modelName)
-		fmt.Println("Found", len(albumLinks), "albums")
-		for _, link := range albumLinks {
-			downloadAlbum(link, downloadsDir, finalizeWithZip, false)
-		}
-
-		// Candids
-		candidLinks := getAllAlbumLinks(contentBase+"/photos/view=candids/", modelName)
+		// 1. Dedicated candids page
+		candidLinks := getAllAlbumLinks(strings.TrimSuffix(albumURL, "/")+"/photos/view/candids/", modelName)
 		fmt.Println("Found", len(candidLinks), "candid posts")
 		for _, link := range candidLinks {
 			downloadAlbum(link, downloadsDir, finalizeWithZip, true)
 		}
 
-		// Blog posts — sweep main feed using the original input URL (blog pagination
-		// works regardless of members/ vs girls/ path) until rel="next" disappears.
+		// 3. Paginated main feed — blog posts only.
 		allBlogLinks := []string{}
 		seenBlogs := map[string]bool{}
+
 		offset := 0
 		for {
 			var pageURL string
@@ -354,7 +270,7 @@ func main() {
 			}
 
 			nextOffset := getNextOffset(bytes.NewReader(rawBytes))
-			if nextOffset < 0 {
+			if nextOffset < 0 || nextOffset == offset {
 				break
 			}
 			offset = nextOffset
