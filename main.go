@@ -249,7 +249,7 @@ func downloadBlogPost(postURL string, downloadsDir string) {
 		wg.Add(1)
 		go func(i int, imageURL string) {
 			defer wg.Done()
-			imageOutput := fmt.Sprintf("%s/%04d.jpg", postDir, i+1)
+			imageOutput := fmt.Sprintf("%s/%s - %s - %04d.jpg", postDir, postID, postName, i+1)
 			b, _ := saveImage(imageURL, imageOutput)
 			mu.Lock()
 			fmt.Printf("[%04d/%04d] — %.2f MB\n", i+1, total, float64(b)/1024/1024)
