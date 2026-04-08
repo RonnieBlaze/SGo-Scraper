@@ -40,6 +40,16 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 	imagesFound := crawlAlbumImages(bytes.NewReader(rawBytes))
 	albumDate, dateErr := getAlbumDate(bytes.NewReader(rawBytes))
 
+	// Extract album ID from URL for file naming (e.g. ".../album/5996040/...")
+	albumID := ""
+	urlParts := strings.Split(strings.TrimSuffix(albumURL, "/"), "/")
+	for i, p := range urlParts {
+		if p == "album" && i+1 < len(urlParts) {
+			albumID = urlParts[i+1]
+			break
+		}
+	}
+
 	fmt.Printf("Found %q set from %s — %d image(s). Downloading...\n", info.AlbumName, info.ModelName, len(imagesFound))
 
 	albumDir := downloadsDir + "/photos/" + info.ModelName + " - " + info.AlbumName
@@ -54,7 +64,7 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 		wg.Add(1)
 		go func(i int, imageURL string) {
 			defer wg.Done()
-			imageOutput := albumDir + "/" + fmt.Sprintf("%04d", i+1) + ".jpg"
+			imageOutput := fmt.Sprintf("%s/%s - %04d.jpg", albumDir, albumID, i+1)
 			b, _ := saveImage(imageURL, imageOutput)
 			imagesDownloaded[i] = imageOutput
 			mu.Lock()
