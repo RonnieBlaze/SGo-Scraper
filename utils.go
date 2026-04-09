@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -24,15 +25,13 @@ func leftPad(s string, padStr string, pLen int) string {
 	return strings.Repeat(padStr, pLen-len(s)) + s
 }
 
-// saveImage downloads url to output using an authenticated HTTP client so that
-// paywalled CDN content (p=1 signed URLs) is served correctly rather than
-// redirecting to the hotlink/ad image.
 func saveImage(url string, output string) (int64, error) {
 	client := newAuthedClient(url)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return 0, err
 	}
+
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
 	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
@@ -66,6 +65,7 @@ func saveImage(url string, output string) (int64, error) {
 			os.Chtimes(output, t, t)
 		}
 	}
+
 	return n, nil
 }
 
@@ -80,29 +80,40 @@ func ZipFiles(filename string, files []string) error {
 	defer zipWriter.Close()
 
 	for _, file := range files {
+		if file == "" {
+			continue
+		}
 		zipfile, err := os.Open(file)
 		if err != nil {
 			return err
 		}
-		defer zipfile.Close()
 
 		info, err := zipfile.Stat()
 		if err != nil {
+			zipfile.Close()
 			return err
 		}
+
 		header, err := zip.FileInfoHeader(info)
 		if err != nil {
+			zipfile.Close()
 			return err
 		}
+		header.Name = filepath.Base(file)
 		header.Method = zip.Deflate
 
 		writer, err := zipWriter.CreateHeader(header)
 		if err != nil {
+			zipfile.Close()
 			return err
 		}
+
 		if _, err = io.Copy(writer, zipfile); err != nil {
+			zipfile.Close()
 			return err
 		}
+		zipfile.Close()
 	}
+
 	return nil
 }

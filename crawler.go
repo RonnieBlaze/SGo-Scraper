@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"html"
 	"io"
@@ -17,11 +18,15 @@ import (
 	gohtml "golang.org/x/net/html"
 )
 
-// crawlAlbumImages scrapes full-resolution .jpg links from <a href> tags on proper album pages.
+var albumLinkPattern = regexp.MustCompile(`/((?:girls|members))/([^/]+)/album/(\d+)(?:/[^"'#?]+)?/?`)
+var memberAlbumLinkPattern = regexp.MustCompile(`/members/([^/]+)/album/(\d+)(?:/[^"'#?]+)?/?`)
+var blogLinkPattern = regexp.MustCompile(`/members/([^/]+)/blog/(\d+)(?:/[^"'#?]+)?/?`)
+var videoLinkPattern = regexp.MustCompile(`/videos/(\d+)(?:/[^"'#?]+)?/?`)
+
 func crawlAlbumImages(rawContents io.Reader) []string {
 	z := gohtml.NewTokenizer(rawContents)
 	var imagesFound []string
-
+	seen := map[string]bool{}
 	for tt := z.Next(); ; tt = z.Next() {
 		switch tt {
 		case gohtml.ErrorToken:
@@ -31,22 +36,21 @@ func crawlAlbumImages(rawContents io.Reader) []string {
 			if t.Data != "a" {
 				continue
 			}
-			link := getValueFromAttribute(t, "href")
-			if strings.HasPrefix(link, "https") && strings.Contains(link, ".jpg") {
-				imagesFound = append(imagesFound, link)
+			link := html.UnescapeString(getValueFromAttribute(t, "href"))
+			if strings.HasPrefix(link, "https") && strings.Contains(strings.ToLower(link), ".jpg") {
+				if !seen[link] {
+					seen[link] = true
+					imagesFound = append(imagesFound, link)
+				}
 			}
 		}
 	}
 }
 
-// crawlCandidImages scrapes full-resolution images from a candid or blog post page
-// via <a data-picture-url="...">. This is the only image source on one-image post
-// pages; <img> tags only carry cache thumbnails there.
 func crawlCandidImages(rawContents io.Reader) []string {
 	z := gohtml.NewTokenizer(rawContents)
 	var imagesFound []string
 	seen := map[string]bool{}
-
 	for tt := z.Next(); ; tt = z.Next() {
 		if tt == gohtml.ErrorToken {
 			return imagesFound
@@ -63,36 +67,35 @@ func crawlCandidImages(rawContents io.Reader) []string {
 			continue
 		}
 		u := html.UnescapeString(raw)
-		if u == "" {
-			continue
-		}
-		if !seen[u] {
+		if u != "" && !seen[u] {
 			seen[u] = true
 			imagesFound = append(imagesFound, u)
 		}
 	}
 }
 
-// dataOriginalRe matches the FULL data-original URL (including query string /
-// signature) inside <script type="x-custom-image"> blocks. The tokenizer treats
-// those blocks as opaque text so we scan raw bytes instead.
-//
-// KEY: use a plain " in the character class — not \" — because this is a raw
-// backtick string where backslash has no special meaning outside of regexp syntax.
 var dataOriginalRe = regexp.MustCompile(`data-original="(https?://[^"]+)"`)
+var imageURLRe = regexp.MustCompile(`https?://[^"'<>\s]+\.(?:jpg|jpeg|png|webp)(?:\?[^"'<>\s]*)?`)
 
-// crawlBlogImagesRegex extracts full-resolution image URLs from raw page bytes.
-// Used as a fallback when the page embeds images inside <script type="x-custom-image">.
 func crawlBlogImagesRegex(rawBytes []byte) []string {
 	seen := map[string]bool{}
 	var result []string
-
 	for _, m := range dataOriginalRe.FindAllSubmatch(rawBytes, -1) {
-		u := html.UnescapeString(string(m[1]))
-		if u == "" {
+		if len(m) < 2 {
 			continue
 		}
-		if !seen[u] {
+		u := html.UnescapeString(string(m[1]))
+		if u != "" && !seen[u] {
+			seen[u] = true
+			result = append(result, u)
+		}
+	}
+	if len(result) > 0 {
+		return result
+	}
+	for _, m := range imageURLRe.FindAll(rawBytes, -1) {
+		u := html.UnescapeString(string(m))
+		if u != "" && !seen[u] {
 			seen[u] = true
 			result = append(result, u)
 		}
@@ -100,16 +103,47 @@ func crawlBlogImagesRegex(rawBytes []byte) []string {
 	return result
 }
 
-// albumLinkPattern matches /girls/<name>/album/<id>/<slug>/?.
-var albumLinkPattern = regexp.MustCompile(`/(girls|members)/([^/]+)/album/`)
+var videoSourcesRe = regexp.MustCompile(`"sources"\s*:\s*(\[[^\]]+\])`)
+var videoFileRe = regexp.MustCompile(`"file"\s*:\s*"([^"]+)"`)
+var hlsURLRe = regexp.MustCompile(`https?://[^"'<>\s]+\.m3u8(?:\?[^"'<>\s]*)?`)
+var mp4URLRe = regexp.MustCompile(`https?://[^"'<>\s]+\.mp4(?:\?[^"'<>\s]*)?`)
 
-// crawlAlbums collects album links from a page, restricted to modelName.
-// Passing an empty modelName disables the filter.
+func crawlVideoStream(rawContents io.Reader) string {
+	rawBytes, err := io.ReadAll(rawContents)
+	if err != nil {
+		return ""
+	}
+	if m := videoSourcesRe.FindSubmatch(rawBytes); len(m) > 1 {
+		var sources []map[string]any
+		if err := json.Unmarshal(m[1], &sources); err == nil {
+			for _, src := range sources {
+				if file, ok := src["file"].(string); ok && strings.Contains(file, ".m3u8") {
+					return html.UnescapeString(file)
+				}
+			}
+			for _, src := range sources {
+				if file, ok := src["file"].(string); ok && file != "" {
+					return html.UnescapeString(file)
+				}
+			}
+		}
+	}
+	if m := videoFileRe.FindSubmatch(rawBytes); len(m) > 1 {
+		return html.UnescapeString(string(m[1]))
+	}
+	if m := hlsURLRe.Find(rawBytes); len(m) > 0 {
+		return html.UnescapeString(string(m))
+	}
+	if m := mp4URLRe.Find(rawBytes); len(m) > 0 {
+		return html.UnescapeString(string(m))
+	}
+	return ""
+}
+
 func crawlAlbums(rawContents io.Reader, modelName string) []string {
 	z := gohtml.NewTokenizer(rawContents)
 	var albumsFound []string
 	seen := map[string]bool{}
-
 	for tt := z.Next(); ; tt = z.Next() {
 		if tt == gohtml.ErrorToken {
 			return albumsFound
@@ -129,10 +163,7 @@ func crawlAlbums(rawContents io.Reader, modelName string) []string {
 			continue
 		}
 		m := albumLinkPattern.FindStringSubmatch(link)
-		if m == nil {
-			continue
-		}
-		if modelName != "" && m[2] != modelName {
+		if m == nil || (modelName != "" && m[2] != modelName) {
 			continue
 		}
 		if !strings.HasPrefix(link, "http") {
@@ -145,50 +176,13 @@ func crawlAlbums(rawContents io.Reader, modelName string) []string {
 	}
 }
 
-// getAllAlbumLinks paginates through a listing URL and returns all album links for modelName.
-func getAllAlbumLinks(modelURL string, modelName string) []string {
-	var allAlbums []string
-	seen := map[string]bool{}
-	offset := 0
-
-	for {
-		var pageURL string
-		if offset == 0 {
-			pageURL = modelURL
-		} else {
-			pageURL = fmt.Sprintf("%s?offset=%d", modelURL, offset)
-		}
-		pageSource := getContents(pageURL)
-		rawBytes, _ := io.ReadAll(pageSource)
-		batch := crawlAlbums(bytes.NewReader(rawBytes), modelName)
-		nextOffset := getNextOffset(bytes.NewReader(rawBytes))
-
-		for _, link := range batch {
-			if !seen[link] {
-				seen[link] = true
-				allAlbums = append(allAlbums, link)
-			}
-		}
-		if nextOffset < 0 {
-			break
-		}
-		offset = nextOffset
-	}
-	return allAlbums
-}
-
-// blogLinkPattern matches /members/<name>/blog/<id>/<slug>/ or /girls/<name>/blog/...
-var blogLinkPattern = regexp.MustCompile(`/(members|girls)/([^/]+)/blog/(\d+)/`)
-
-// crawlBlogLinks collects blog post links for modelName from a page.
-func crawlBlogLinks(rawContents io.Reader, modelName string) []string {
+func crawlMemberAlbums(rawContents io.Reader, modelName string) []string {
 	z := gohtml.NewTokenizer(rawContents)
-	var linksFound []string
+	var found []string
 	seen := map[string]bool{}
-
 	for tt := z.Next(); ; tt = z.Next() {
 		if tt == gohtml.ErrorToken {
-			return linksFound
+			return found
 		}
 		if tt != gohtml.StartTagToken {
 			continue
@@ -198,11 +192,14 @@ func crawlBlogLinks(rawContents io.Reader, modelName string) []string {
 			continue
 		}
 		link := getValueFromAttribute(t, "href")
+		if link == "" {
+			continue
+		}
 		if !strings.HasPrefix(link, "/") && !strings.HasPrefix(link, "https://www.suicidegirls.com") {
 			continue
 		}
-		m := blogLinkPattern.FindStringSubmatch(link)
-		if m == nil || m[2] != modelName {
+		m := memberAlbumLinkPattern.FindStringSubmatch(link)
+		if m == nil || (modelName != "" && m[1] != modelName) {
 			continue
 		}
 		if !strings.HasPrefix(link, "http") {
@@ -210,9 +207,192 @@ func crawlBlogLinks(rawContents io.Reader, modelName string) []string {
 		}
 		if !seen[link] {
 			seen[link] = true
-			linksFound = append(linksFound, link)
+			found = append(found, link)
 		}
 	}
+}
+
+func crawlBlogLinks(rawContents io.Reader, modelName string) []string {
+	z := gohtml.NewTokenizer(rawContents)
+	var found []string
+	seen := map[string]bool{}
+	for tt := z.Next(); ; tt = z.Next() {
+		if tt == gohtml.ErrorToken {
+			return found
+		}
+		if tt != gohtml.StartTagToken {
+			continue
+		}
+		t := z.Token()
+		if t.Data != "a" {
+			continue
+		}
+		link := getValueFromAttribute(t, "href")
+		if link == "" {
+			continue
+		}
+		if !strings.HasPrefix(link, "/") && !strings.HasPrefix(link, "https://www.suicidegirls.com") {
+			continue
+		}
+		m := blogLinkPattern.FindStringSubmatch(link)
+		if m == nil || (modelName != "" && m[1] != modelName) {
+			continue
+		}
+		if !strings.HasPrefix(link, "http") {
+			link = "https://www.suicidegirls.com" + link
+		}
+		if !seen[link] {
+			seen[link] = true
+			found = append(found, link)
+		}
+	}
+}
+
+func crawlVideoLinks(rawContents io.Reader) []string {
+	z := gohtml.NewTokenizer(rawContents)
+	var found []string
+	seen := map[string]bool{}
+	for tt := z.Next(); ; tt = z.Next() {
+		if tt == gohtml.ErrorToken {
+			return found
+		}
+		if tt != gohtml.StartTagToken {
+			continue
+		}
+		t := z.Token()
+		if t.Data != "a" {
+			continue
+		}
+		link := getValueFromAttribute(t, "href")
+		if link == "" {
+			continue
+		}
+		if !strings.HasPrefix(link, "/") && !strings.HasPrefix(link, "https://www.suicidegirls.com") {
+			continue
+		}
+		if videoLinkPattern.FindStringSubmatch(link) == nil {
+			continue
+		}
+		if !strings.HasPrefix(link, "http") {
+			link = "https://www.suicidegirls.com" + link
+		}
+		if !seen[link] {
+			seen[link] = true
+			found = append(found, link)
+		}
+	}
+}
+
+func getAllAlbumLinks(modelURL string, modelName string) []string {
+	var all []string
+	seen := map[string]bool{}
+	offset := 0
+	for {
+		var pageURL string
+		if offset == 0 {
+			pageURL = modelURL
+		} else {
+			pageURL = fmt.Sprintf("%s?offset=%d", modelURL, offset)
+		}
+		pageSource := getContents(pageURL)
+		rawBytes, _ := io.ReadAll(pageSource)
+		for _, link := range crawlAlbums(bytes.NewReader(rawBytes), modelName) {
+			if !seen[link] {
+				seen[link] = true
+				all = append(all, link)
+			}
+		}
+		nextOffset := getNextOffset(bytes.NewReader(rawBytes))
+		if nextOffset < 0 {
+			break
+		}
+		offset = nextOffset
+	}
+	return all
+}
+
+func getAllMemberAlbumLinks(modelURL string, modelName string) []string {
+	var all []string
+	seen := map[string]bool{}
+	offset := 0
+	for {
+		var pageURL string
+		if offset == 0 {
+			pageURL = modelURL
+		} else {
+			pageURL = fmt.Sprintf("%s?offset=%d", modelURL, offset)
+		}
+		pageSource := getContents(pageURL)
+		rawBytes, _ := io.ReadAll(pageSource)
+		for _, link := range crawlMemberAlbums(bytes.NewReader(rawBytes), modelName) {
+			if !seen[link] {
+				seen[link] = true
+				all = append(all, link)
+			}
+		}
+		nextOffset := getNextOffset(bytes.NewReader(rawBytes))
+		if nextOffset < 0 {
+			break
+		}
+		offset = nextOffset
+	}
+	return all
+}
+
+func getAllBlogLinks(modelURL string, modelName string) []string {
+	var all []string
+	seen := map[string]bool{}
+	offset := 0
+	for {
+		var pageURL string
+		if offset == 0 {
+			pageURL = modelURL
+		} else {
+			pageURL = fmt.Sprintf("%s?offset=%d", modelURL, offset)
+		}
+		pageSource := getContents(pageURL)
+		rawBytes, _ := io.ReadAll(pageSource)
+		for _, link := range crawlBlogLinks(bytes.NewReader(rawBytes), modelName) {
+			if !seen[link] {
+				seen[link] = true
+				all = append(all, link)
+			}
+		}
+		nextOffset := getNextOffset(bytes.NewReader(rawBytes))
+		if nextOffset < 0 {
+			break
+		}
+		offset = nextOffset
+	}
+	return all
+}
+
+func getAllVideoLinks(modelURL string) []string {
+	var all []string
+	seen := map[string]bool{}
+	offset := 0
+	for {
+		var pageURL string
+		if offset == 0 {
+			pageURL = modelURL
+		} else {
+			pageURL = fmt.Sprintf("%s?offset=%d", modelURL, offset)
+		}
+		pageSource := getContents(pageURL)
+		rawBytes, _ := io.ReadAll(pageSource)
+		for _, link := range crawlVideoLinks(bytes.NewReader(rawBytes)) {
+			if !seen[link] {
+				seen[link] = true
+				all = append(all, link)
+			}
+		}
+		nextOffset := getNextOffset(bytes.NewReader(rawBytes))
+		if nextOffset < 0 {
+			break
+		}
+		offset = nextOffset
+	}
+	return all
 }
 
 func getTitle(rawContents io.Reader) string {
@@ -226,64 +406,56 @@ func getTitle(rawContents io.Reader) string {
 			if t.Data != "title" {
 				continue
 			}
-			z.Next()
-			return z.Token().Data
+			if z.Next() == gohtml.TextToken {
+				return z.Token().Data
+			}
 		}
 	}
 }
 
-// PageInfo holds parsed metadata from a page title.
 type PageInfo struct {
-	ModelName string // e.g. Psylunar
-	PostName  string // e.g. Christmas Vibes (empty for proper albums)
-	AlbumName string // e.g. Honey dump (empty for candid posts)
+	ModelName string
+	PostName  string
+	AlbumName string
 	IsCandid  bool
 }
 
-// parsePageInfo parses the raw page title into a PageInfo.
-// Known formats:
-//   Proper album (new): "Model Photo Album: Name | SuicideGirls"
-//   Proper album (old): "Model - Photo Album Name | SuicideGirls"
-//   Candid post:        "PostName by Model | SuicideGirls"
 func parsePageInfo(rawTitle string) PageInfo {
-	// New format: "Reignausten Photo Album: Sea Foam Sweetie | SuicideGirls"
-	if idx := strings.Index(rawTitle, " Photo Album: "); idx != -1 {
-		model := strings.TrimSpace(rawTitle[:idx])
-		rest := rawTitle[idx+len(" Photo Album: "):]
-		name := strings.TrimSpace(strings.SplitN(rest, "|", 2)[0])
-		return PageInfo{ModelName: sanitizeName(model), AlbumName: sanitizeName(name), IsCandid: false}
+	cleanTitle := strings.TrimSpace(rawTitle)
+	if idx := strings.Index(cleanTitle, "Photo Album"); idx != -1 {
+		model := strings.TrimSpace(strings.TrimRight(cleanTitle[:idx], " -:|"))
+		after := strings.TrimSpace(cleanTitle[idx+len("Photo Album"):])
+		name := strings.TrimSpace(strings.TrimLeft(after, " -:|"))
+		name = strings.TrimSpace(strings.SplitN(name, " | ", 2)[0])
+		if byIdx := strings.LastIndex(name, " by "); byIdx != -1 {
+			name = strings.TrimSpace(name[:byIdx])
+		}
+		return PageInfo{ModelName: sanitizeName(model), AlbumName: sanitizeName(name)}
 	}
-	// Old format: "Model - Photo Album Name | SuicideGirls"
-	if idx := strings.Index(rawTitle, " - Photo Album "); idx != -1 {
-		model := strings.TrimSpace(rawTitle[:idx])
-		rest := rawTitle[idx+len(" - Photo Album "):]
-		name := strings.TrimSpace(strings.SplitN(rest, "|", 2)[0])
-		return PageInfo{ModelName: sanitizeName(model), AlbumName: sanitizeName(name), IsCandid: false}
-	}
-
-	if idx := strings.LastIndex(rawTitle, " by "); idx != -1 {
-		postName := strings.TrimSpace(rawTitle[:idx])
-		rest := rawTitle[idx+len(" by "):]
-		model := strings.TrimSpace(strings.SplitN(rest, "|", 2)[0])
+	if idx := strings.LastIndex(cleanTitle, " by "); idx != -1 {
+		postName := strings.TrimSpace(cleanTitle[:idx])
+		rest := cleanTitle[idx+len(" by "):]
+		model := strings.TrimSpace(strings.SplitN(rest, " | ", 2)[0])
 		return PageInfo{ModelName: sanitizeName(model), PostName: sanitizeName(postName), IsCandid: true}
 	}
-
 	fmt.Println("Warning: unrecognised title format:", rawTitle)
-	return PageInfo{ModelName: sanitizeName(rawTitle)}
-}
-
-// getAlbumInfo is kept for backward compatibility where only model/album names are needed.
-func getAlbumInfo(rawContents io.Reader) (modelName string, albumName string) {
-	info := parsePageInfo(getTitle(rawContents))
-	if info.AlbumName != "" {
-		return info.ModelName, info.AlbumName
-	}
-	return info.ModelName, "Unknown"
+	return PageInfo{ModelName: sanitizeName(cleanTitle)}
 }
 
 func sanitizeName(s string) string {
-	replacer := strings.NewReplacer("/", "-", `\`, "-", ":", "-", "*", "-", "?", "", `"`, "", "<", "", ">", "", "|", "-", ".", "")
+	replacer := strings.NewReplacer(
+		"/", "-", "\\", "-", ":", "-", "*", "-",
+		"?", "", `"`, "", "<", "", ">", "", "|", "-",
+	)
 	return strings.TrimSpace(replacer.Replace(s))
+}
+
+func truncateName(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return strings.TrimSpace(string(runes[:maxLen]))
 }
 
 func getAlbumDate(rawContents io.Reader) (time.Time, error) {
@@ -295,14 +467,15 @@ func getAlbumDate(rawContents io.Reader) (time.Time, error) {
 		if tt == gohtml.StartTagToken {
 			t := z.Token()
 			if t.Data == "time" {
-				z.Next()
-				text := strings.TrimSpace(z.Token().Data)
-				if text != "" {
-					if parsed, err := time.Parse("Jan 2, 2006", text); err == nil {
-						return parsed, nil
-					}
-					if parsed, err := time.Parse("Jan 2", text); err == nil {
-						return parsed.AddDate(time.Now().Year(), 0, 0), nil
+				if z.Next() == gohtml.TextToken {
+					text := strings.TrimSpace(z.Token().Data)
+					if text != "" {
+						if parsed, err := time.Parse("Jan 2, 2006", text); err == nil {
+							return parsed, nil
+						}
+						if parsed, err := time.Parse("Jan 2", text); err == nil {
+							return parsed.AddDate(time.Now().Year(), 0, 0), nil
+						}
 					}
 				}
 			}
@@ -311,10 +484,7 @@ func getAlbumDate(rawContents io.Reader) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("date not found in page")
 }
 
-// newAuthedClient builds an http.Client with the SG session cookies attached.
-// Used for both page fetches and image downloads so that paywalled (p=1) CDN
-// URLs receive the session credentials they need.
-func newAuthedClient(target string) *http.Client {
+func newAuthedClient(target string) http.Client {
 	sessionidCookie := os.Getenv("SESSIONIDTOKEN")
 	sgcsrftoken := os.Getenv("SGCSRFTOKEN")
 	rsciVid := os.Getenv("RSCIVID")
@@ -331,19 +501,16 @@ func newAuthedClient(target string) *http.Client {
 			continue
 		}
 		cookies = append(cookies, &http.Cookie{
-			Name:   c.name,
-			Value:  c.value,
-			Path:   "/",
-			Domain: ".suicidegirls.com",
+			Name: c.name, Value: c.value,
+			Path: "/", Domain: ".suicidegirls.com",
 		})
 	}
-
-	for _, base := range []string{target, "https://www.suicidegirls.com/", "https://suicidegirls.com/"} {
+	for _, base := range []string{target, "https://www.suicidegirls.com", "https://suicidegirls.com"} {
 		if u, err := url.Parse(base); err == nil {
 			jar.SetCookies(u, cookies)
 		}
 	}
-	return &http.Client{Jar: jar}
+	return http.Client{Jar: jar}
 }
 
 func getContents(link string) io.Reader {
@@ -369,8 +536,6 @@ func getValueFromAttribute(t gohtml.Token, attr string) string {
 	return ""
 }
 
-// getNextOffset reads <link rel="next" href="..."> and returns the offset N,
-// or -1 when no such tag exists (last page).
 func getNextOffset(rawContents io.Reader) int {
 	z := gohtml.NewTokenizer(rawContents)
 	for tt := z.Next(); ; tt = z.Next() {
@@ -397,41 +562,4 @@ func getNextOffset(rawContents io.Reader) int {
 			}
 		}
 	}
-}
-
-// resolveContentBase looks for the Photos nav link to find the canonical content URL.
-// Handles /members/ profiles whose photos live under /girls/ instead.
-func resolveContentBase(rawContents io.Reader, inputURL string) string {
-	z := gohtml.NewTokenizer(rawContents)
-	for tt := z.Next(); ; tt = z.Next() {
-		if tt == gohtml.ErrorToken {
-			break
-		}
-		if tt != gohtml.StartTagToken {
-			continue
-		}
-		t := z.Token()
-		if t.Data != "a" {
-			continue
-		}
-		href := getValueFromAttribute(t, "href")
-		if !strings.HasSuffix(href, "photos/") && !strings.HasSuffix(href, "photos") {
-			continue
-		}
-		if !strings.Contains(href, "/girls/") && !strings.Contains(href, "/members/") {
-			continue
-		}
-		base := strings.TrimSuffix(href, "photos/")
-		base = strings.TrimSuffix(base, "photos")
-		base = strings.TrimSuffix(base, "/")
-		if !strings.HasPrefix(base, "http") {
-			if strings.HasPrefix(base, "/") {
-				base = "https://www.suicidegirls.com" + base
-			} else {
-				base = "https://www.suicidegirls.com/" + base
-			}
-		}
-		return base
-	}
-	return strings.TrimSuffix(inputURL, "/")
 }
