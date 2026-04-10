@@ -366,16 +366,6 @@ func main() {
 			downloadBlogPost(link, downloadsDir)
 		}
 
-		feedLinks := getAllMemberAlbumLinks(albumURL, modelName)
-		fmt.Println("Found", len(feedLinks), "feed posts")
-		for _, link := range feedLinks {
-			if seen[link] {
-				continue
-			}
-			seen[link] = true
-			downloadBlogPost(link, downloadsDir)
-		}
-
 		fmt.Println("Done!")
 	}
 }
