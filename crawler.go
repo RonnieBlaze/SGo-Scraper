@@ -23,6 +23,143 @@ var memberAlbumLinkPattern = regexp.MustCompile(`/members/([^/]+)/album/(\d+)(?:
 var blogLinkPattern = regexp.MustCompile(`/members/([^/]+)/blog/(\d+)(?:/[^"'#?]+)?/?`)
 var videoLinkPattern = regexp.MustCompile(`/videos/(\d+)(?:/[^"'#?]+)?/?`)
 
+// ── group thread ────────────────────────────────────────────────────────────
+var memberHrefRe = regexp.MustCompile(`href="/(?:members|girls)/([^/"]+)/"`)
+var htmlTagRe = regexp.MustCompile(`<[^>]+>`)
+
+type GroupThreadImageBucket struct {
+	CommentID   string
+	Username    string
+	CommentText string
+	Images      []string
+}
+
+func stripHTML(b []byte) string {
+	plain := htmlTagRe.ReplaceAll(b, []byte(" "))
+	decoded := html.UnescapeString(string(plain))
+	return strings.Join(strings.Fields(decoded), " ")
+}
+
+var commentTextMarker = []byte(`<div class="comment-text" data-comment-id="`)
+
+func crawlGroupThreadImageBuckets(rawContents io.Reader) []GroupThreadImageBucket {
+	rawBytes, err := io.ReadAll(rawContents)
+	if err != nil {
+		return nil
+	}
+	const marker = `<div class="flex-wrapper" data-comment-id="`
+	parts := bytes.Split(rawBytes, []byte(marker))
+
+	var buckets []GroupThreadImageBucket
+	for _, part := range parts[1:] {
+		idEnd := bytes.IndexByte(part, '"')
+		if idEnd < 0 {
+			continue
+		}
+		commentID := sanitizeName(string(part[:idEnd]))
+		if commentID == "" {
+			continue
+		}
+		ctIdx := bytes.Index(part, commentTextMarker)
+		headerBlock := part
+		if ctIdx > 0 {
+			headerBlock = part[:ctIdx]
+		}
+		username := ""
+		if um := memberHrefRe.FindSubmatch(headerBlock); len(um) > 1 {
+			username = sanitizeName(string(um[1]))
+		}
+		if ctIdx < 0 {
+			continue
+		}
+		openEnd := bytes.IndexByte(part[ctIdx:], '>')
+		if openEnd < 0 {
+			continue
+		}
+		body := part[ctIdx+openEnd+1:]
+		if timeIdx := bytes.Index(body, []byte("<time>")); timeIdx > 0 {
+			body = body[:timeIdx]
+		}
+		seen := map[string]bool{}
+		var imgs []string
+		for _, im := range dataOriginalRe.FindAllSubmatch(body, -1) {
+			if len(im) < 2 {
+				continue
+			}
+			u := html.UnescapeString(string(im[1]))
+			if u != "" && !seen[u] {
+				seen[u] = true
+				imgs = append(imgs, u)
+			}
+		}
+		if len(imgs) == 0 {
+			continue
+		}
+		commentText := stripHTML(body)
+		buckets = append(buckets, GroupThreadImageBucket{
+			CommentID:   commentID,
+			Username:    username,
+			CommentText: commentText,
+			Images:      imgs,
+		})
+	}
+	return buckets
+}
+
+func getAllGroupThreadImageBuckets(threadURL string) []GroupThreadImageBucket {
+	seenImgs := map[string]map[string]bool{}
+	bucketMeta := map[string]GroupThreadImageBucket{}
+	baseURL := strings.TrimSuffix(threadURL, "/") + "/comments/all?lazy=1"
+	offset := 0
+	for {
+		var pageURL string
+		if offset == 0 {
+			pageURL = baseURL
+		} else {
+			pageURL = fmt.Sprintf("%s&offset=%d", baseURL, offset)
+		}
+		pageSource := getContents(pageURL)
+		rawBytes, _ := io.ReadAll(pageSource)
+		for _, bucket := range crawlGroupThreadImageBuckets(bytes.NewReader(rawBytes)) {
+			key := bucket.CommentID
+			if _, ok := seenImgs[key]; !ok {
+				seenImgs[key] = map[string]bool{}
+				bucketMeta[key] = GroupThreadImageBucket{
+					CommentID:   bucket.CommentID,
+					Username:    bucket.Username,
+					CommentText: bucket.CommentText,
+				}
+			}
+			meta := bucketMeta[key]
+			if meta.Username == "" && bucket.Username != "" {
+				meta.Username = bucket.Username
+			}
+			if meta.CommentText == "" && bucket.CommentText != "" {
+				meta.CommentText = bucket.CommentText
+			}
+			bucketMeta[key] = meta
+			for _, img := range bucket.Images {
+				seenImgs[key][img] = true
+			}
+		}
+		nextOffset := getNextOffset(bytes.NewReader(rawBytes))
+		if nextOffset < 0 {
+			break
+		}
+		offset = nextOffset
+	}
+	var result []GroupThreadImageBucket
+	for key, meta := range bucketMeta {
+		for img := range seenImgs[key] {
+			meta.Images = append(meta.Images, img)
+		}
+		result = append(result, meta)
+	}
+	return result
+}
+
+// ── image scrapers ───────────────────────────────────────────────────────────
+
 func crawlAlbumImages(rawContents io.Reader) []string {
 	z := gohtml.NewTokenizer(rawContents)
 	var imagesFound []string
@@ -103,6 +240,8 @@ func crawlBlogImagesRegex(rawBytes []byte) []string {
 	return result
 }
 
+// ── video stream ─────────────────────────────────────────────────────────────
+
 var videoSourcesRe = regexp.MustCompile(`"sources"\s*:\s*(\[[^\]]+\])`)
 var videoFileRe = regexp.MustCompile(`"file"\s*:\s*"([^"]+)"`)
 var hlsURLRe = regexp.MustCompile(`https?://[^"'<>\s]+\.m3u8(?:\?[^"'<>\s]*)?`)
@@ -139,6 +278,8 @@ func crawlVideoStream(rawContents io.Reader) string {
 	}
 	return ""
 }
+
+// ── link crawlers ─────────────────────────────────────────────────────────────
 
 func crawlAlbums(rawContents io.Reader, modelName string) []string {
 	z := gohtml.NewTokenizer(rawContents)
@@ -283,6 +424,8 @@ func crawlVideoLinks(rawContents io.Reader) []string {
 	}
 }
 
+// ── paginated sweeps ──────────────────────────────────────────────────────────
+
 func getAllAlbumLinks(modelURL string, modelName string) []string {
 	var all []string
 	seen := map[string]bool{}
@@ -394,6 +537,8 @@ func getAllVideoLinks(modelURL string) []string {
 	}
 	return all
 }
+
+// ── page helpers ──────────────────────────────────────────────────────────────
 
 func getTitle(rawContents io.Reader) string {
 	z := gohtml.NewTokenizer(rawContents)

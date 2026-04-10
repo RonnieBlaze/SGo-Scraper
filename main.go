@@ -109,9 +109,12 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 		case "album", "blog":
 			if i+1 < len(parts) {
 				postID = parts[i+1]
-			}
-			if i+2 < len(parts) && parts[i+2] != "" {
-				urlSlug = sanitizeName(parts[i+2])
+				if i+2 < len(parts) && parts[i+2] != "" {
+					urlSlug = sanitizeName(parts[i+2])
+				}
+				if postID != "" {
+					break
+				}
 			}
 		}
 		if postID != "" {
@@ -205,6 +208,89 @@ func downloadBlogPost(postURL string, downloadsDir string) {
 	downloadAlbum(postURL, downloadsDir, false, true)
 }
 
+func downloadGroupThread(threadURL string, downloadsDir string) {
+	pageSource := getContents(threadURL)
+	rawBytes, err := io.ReadAll(pageSource)
+	if err != nil {
+		panic(err)
+	}
+
+	parts := strings.Split(strings.TrimSuffix(threadURL, "/"), "/")
+	groupName := "group"
+	threadID := "thread"
+	for i, p := range parts {
+		if p == "groups" && i+1 < len(parts) {
+			groupName = sanitizeName(parts[i+1])
+		}
+		if p == "thread" && i+1 < len(parts) {
+			threadID = sanitizeName(parts[i+1])
+		}
+	}
+
+	rawTitle := strings.TrimSpace(strings.Split(getTitle(bytes.NewReader(rawBytes)), " by ")[0])
+	threadTitle := sanitizeName(rawTitle)
+	if threadTitle == "" {
+		threadTitle = threadID
+	}
+	threadTitle = truncateName(threadTitle, 60)
+
+	threadDir := fmt.Sprintf("%s/groups/%s/%s - %s", downloadsDir, groupName, threadID, threadTitle)
+
+	buckets := getAllGroupThreadImageBuckets(threadURL)
+	if len(buckets) == 0 {
+		fmt.Printf("Group thread %s/%s — no images found, skipping\n", groupName, threadID)
+		return
+	}
+
+	fmt.Printf("Group thread %s/%s (%s) — %d post(s) with images\n", groupName, threadID, threadTitle, len(buckets))
+	checkAndCreateDir(threadDir)
+
+	for _, bucket := range buckets {
+		if len(bucket.Images) == 0 {
+			continue
+		}
+
+		commentSnippet := truncateName(sanitizeName(bucket.CommentText), 60)
+		var baseName string
+		if commentSnippet != "" {
+			baseName = fmt.Sprintf("%s - %s - %s", bucket.CommentID, bucket.Username, commentSnippet)
+		} else {
+			baseName = fmt.Sprintf("%s - %s", bucket.CommentID, bucket.Username)
+		}
+
+		total := len(bucket.Images)
+		if total == 1 {
+			imageOutput := fmt.Sprintf("%s/%s - 0001.jpg", threadDir, baseName)
+			b, err := saveImage(bucket.Images[0], imageOutput)
+			if err != nil {
+				fmt.Printf("%s [0001/0001] — error: %v\n", baseName, err)
+				continue
+			}
+			fmt.Printf("%s [0001/0001] — %.2f MB\n", baseName, float64(b)/1024/1024)
+			continue
+		}
+
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		for i, imageURL := range bucket.Images {
+			wg.Add(1)
+			go func(i int, imageURL string) {
+				defer wg.Done()
+				imageOutput := fmt.Sprintf("%s/%s - %04d.jpg", threadDir, baseName, i+1)
+				b, err := saveImage(imageURL, imageOutput)
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					fmt.Printf("%s [%04d/%04d] — error: %v\n", baseName, i+1, total, err)
+					return
+				}
+				fmt.Printf("%s [%04d/%04d] — %.2f MB\n", baseName, i+1, total, float64(b)/1024/1024)
+			}(i, imageURL)
+		}
+		wg.Wait()
+	}
+}
+
 func main() {
 	err := godotenv.Load()
 	if err != nil {
@@ -214,14 +300,18 @@ func main() {
 	downloadsDir := os.Getenv("DOWNLOADSDIR")
 	args := os.Args
 	if len(args) < 2 {
-		panic("usage: SGo-Scraper [-z]")
+		panic("usage: SGo-Scraper <url> [-z]")
 	}
+
 	albumURL := args[1]
 	finalizeWithZip := args[len(args)-1] == "-z"
 
 	checkAndCreateDir(downloadsDir)
 
 	switch {
+	case strings.Contains(albumURL, "/groups/") && strings.Contains(albumURL, "/thread/"):
+		downloadGroupThread(albumURL, downloadsDir)
+
 	case strings.Contains(albumURL, "/videos/"):
 		downloadVideoPost(albumURL, downloadsDir, "")
 
