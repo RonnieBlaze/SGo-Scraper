@@ -11,6 +11,29 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// dirExistsAndNonEmpty returns true if path is a directory containing at least one file.
+func dirExistsAndNonEmpty(path string) bool {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false
+	}
+	return len(entries) > 0
+}
+
+// fileExistsWithPrefix returns true if any file in dir starts with prefix.
+func fileExistsWithPrefix(dir string, prefix string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func downloadAlbum(albumURL string, downloadsDir string, finalizeWithZip bool, isCandid bool) {
 	pageSource := getContents(albumURL)
 	rawBytes, err := io.ReadAll(pageSource)
@@ -150,6 +173,20 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 	}
 	postName = truncateName(postName, 80)
 
+	modelDir := downloadsDir + "/candids/" + modelName
+
+	// --- differential: skip if already on disk ---
+	if fileExistsWithPrefix(modelDir, postID+" - ") {
+		fmt.Printf("[skip] Candid post %s/%s — already on disk\n", modelName, postID)
+		return
+	}
+	postDir := fmt.Sprintf("%s/%s - %s", modelDir, postID, postName)
+	if dirExistsAndNonEmpty(postDir) {
+		fmt.Printf("[skip] Candid post %s/%s — already on disk\n", modelName, postID)
+		return
+	}
+	// ---------------------------------------------
+
 	imagesFound := crawlAlbumImages(bytes.NewReader(rawBytes))
 	if len(imagesFound) == 0 {
 		imagesFound = crawlCandidImages(bytes.NewReader(rawBytes))
@@ -162,7 +199,6 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 		return
 	}
 
-	modelDir := downloadsDir + "/candids/" + modelName
 	checkAndCreateDir(modelDir)
 
 	fmt.Printf("Candid post %s/%s (%s) — %d image(s)\n", modelName, postID, postName, len(imagesFound))
@@ -178,7 +214,6 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 		return
 	}
 
-	postDir := fmt.Sprintf("%s/%s - %s", modelDir, postID, postName)
 	checkAndCreateDir(postDir)
 
 	var wg sync.WaitGroup
@@ -257,6 +292,13 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 		} else {
 			baseName = fmt.Sprintf("%s - %s", bucket.CommentID, bucket.Username)
 		}
+
+		// --- differential: skip individual post if already on disk ---
+		if fileExistsWithPrefix(threadDir, bucket.CommentID+" - ") {
+			fmt.Printf("[skip] %s — already on disk\n", baseName)
+			continue
+		}
+		// -------------------------------------------------------------
 
 		total := len(bucket.Images)
 		if total == 1 {
