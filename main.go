@@ -11,20 +11,6 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// entryExistsWithPrefix returns true if any file or subdir in dir starts with prefix.
-func entryExistsWithPrefix(dir string, prefix string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), prefix) {
-			return true
-		}
-	}
-	return false
-}
-
 func downloadAlbum(albumURL string, downloadsDir string, finalizeWithZip bool, isCandid bool) {
 	pageSource := getContents(albumURL)
 	rawBytes, err := io.ReadAll(pageSource)
@@ -126,6 +112,9 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 				if i+2 < len(parts) && parts[i+2] != "" {
 					urlSlug = sanitizeName(parts[i+2])
 				}
+				if postID != "" {
+					break
+				}
 			}
 		}
 		if postID != "" {
@@ -161,14 +150,6 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 	}
 	postName = truncateName(postName, 80)
 
-	modelDir := downloadsDir + "/candids/" + modelName
-
-	// Skip if any file/dir with this postID already exists on disk.
-	if entryExistsWithPrefix(modelDir, postID) {
-		fmt.Printf("[skip] Candid post %s/%s — already on disk\n", modelName, postID)
-		return
-	}
-
 	imagesFound := crawlAlbumImages(bytes.NewReader(rawBytes))
 	if len(imagesFound) == 0 {
 		imagesFound = crawlCandidImages(bytes.NewReader(rawBytes))
@@ -179,6 +160,18 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 	if len(imagesFound) == 0 {
 		fmt.Printf("Candid post %s/%s — no images found, skipping\n", modelName, postID)
 		return
+	}
+
+	modelDir := downloadsDir + "/candids/" + modelName
+
+	// Skip if already downloaded.
+	if entries, err := os.ReadDir(modelDir); err == nil {
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), postID) {
+				fmt.Printf("[skip] Candid post %s/%s — already on disk\n", modelName, postID)
+				return
+			}
+		}
 	}
 
 	checkAndCreateDir(modelDir)
@@ -276,11 +269,6 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 			baseName = fmt.Sprintf("%s - %s", bucket.CommentID, bucket.Username)
 		}
 
-		if entryExistsWithPrefix(threadDir, bucket.CommentID) {
-			fmt.Printf("[skip] %s — already on disk\n", baseName)
-			continue
-		}
-
 		total := len(bucket.Images)
 		if total == 1 {
 			imageOutput := fmt.Sprintf("%s/%s - 0001.jpg", threadDir, baseName)
@@ -312,26 +300,6 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 		}
 		wg.Wait()
 	}
-}
-
-// parallelSkipCheck fans out entryExistsWithPrefix checks for a slice of links,
-// calling idFn(link) to get the ID prefix to check against dir.
-// Returns a []bool of the same length — true means already on disk.
-func parallelSkipCheck(dir string, links []string, idFn func(string) string) []bool {
-	result := make([]bool, len(links))
-	var wg sync.WaitGroup
-	for i, link := range links {
-		wg.Add(1)
-		go func(i int, link string) {
-			defer wg.Done()
-			id := idFn(link)
-			if id != "" {
-				result[i] = entryExistsWithPrefix(dir, id)
-			}
-		}(i, link)
-	}
-	wg.Wait()
-	return result
 }
 
 func main() {
@@ -383,84 +351,25 @@ func main() {
 		base := strings.TrimSuffix(albumURL, "/")
 		fmt.Printf("Content base: %s (model: %s)\n", albumURL, modelName)
 
-		// --- Parallel discovery: fetch all three link lists concurrently ---
-		type discovered struct {
-			candids []string
-			videos  []string
-			blogs   []string
-			feed    []string
-		}
-		var disc discovered
-		var discWg sync.WaitGroup
-		discWg.Add(4)
-		go func() { defer discWg.Done(); disc.candids = getAllAlbumLinks(base+"/photos/view/candids/", modelName) }()
-		go func() { defer discWg.Done(); disc.videos = getAllVideoLinks(base + "/videos/") }()
-		go func() { defer discWg.Done(); disc.blogs = getAllBlogLinks(base+"/blog/", modelName) }()
-		go func() { defer discWg.Done(); disc.feed = getAllMemberAlbumLinks(albumURL, modelName) }()
-		discWg.Wait()
-
-		fmt.Println("Found", len(disc.candids), "candid posts")
-		fmt.Println("Found", len(disc.videos), "videos")
-		fmt.Println("Found", len(disc.blogs), "blog posts")
-		fmt.Println("Found", len(disc.feed), "feed posts")
-
-		modelDir := downloadsDir + "/candids/" + titleCaseModelName(modelName)
 		seen := map[string]bool{}
 
-		// candid ID extractor: segment after "album" or "blog"
-		candidIDfn := func(link string) string {
-			p := strings.Split(strings.TrimSuffix(link, "/"), "/")
-			for i, seg := range p {
-				if (seg == "album" || seg == "blog") && i+1 < len(p) {
-					return p[i+1]
-				}
-			}
-			return ""
-		}
-		// video ID extractor: segment after "videos"
-		videoIDfn := func(link string) string {
-			p := strings.Split(strings.TrimSuffix(link, "/"), "/")
-			for i, seg := range p {
-				if seg == "videos" && i+1 < len(p) {
-					return p[i+1]
-				}
-			}
-			return ""
-		}
-
-		// --- Parallel skip checks for candids and videos ---
-		candidSkip := parallelSkipCheck(modelDir, disc.candids, candidIDfn)
-		videoSkip := parallelSkipCheck(modelDir, disc.videos, videoIDfn)
-
-		for i, link := range disc.candids {
+		candidLinks := getAllAlbumLinks(base+"/photos/view/candids/", modelName)
+		fmt.Println("Found", len(candidLinks), "candid posts")
+		for _, link := range candidLinks {
 			seen[link] = true
-			if candidSkip[i] {
-				id := candidIDfn(link)
-				fmt.Printf("[skip] Candid %s/%s — already on disk\n", modelName, id)
-				continue
-			}
 			downloadAlbum(link, downloadsDir, finalizeWithZip, true)
 		}
 
-		for i, link := range disc.videos {
+		videoLinks := getAllVideoLinks(base + "/videos/")
+		fmt.Println("Found", len(videoLinks), "videos")
+		for _, link := range videoLinks {
 			seen[link] = true
-			if videoSkip[i] {
-				id := videoIDfn(link)
-				fmt.Printf("[skip] Video %s/%s — already on disk\n", modelName, id)
-				continue
-			}
 			downloadVideoPost(link, downloadsDir, modelName)
 		}
 
-		for _, link := range disc.blogs {
-			if seen[link] {
-				continue
-			}
-			seen[link] = true
-			downloadBlogPost(link, downloadsDir)
-		}
-
-		for _, link := range disc.feed {
+		blogLinks := getAllBlogLinks(base+"/blog/", modelName)
+		fmt.Println("Found", len(blogLinks), "blog posts")
+		for _, link := range blogLinks {
 			if seen[link] {
 				continue
 			}

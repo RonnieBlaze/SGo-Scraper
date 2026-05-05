@@ -94,10 +94,14 @@ func downloadVideoPost(videoURL string, downloadsDir string, expectedModel strin
 	videoID, postTitle, modelName := parseVideoInfo(videoURL, rawBytes, expectedModel)
 	modelDir := downloadsDir + "/candids/" + modelName
 
-	// Skip if this video already exists on disk.
-	if entryExistsWithPrefix(modelDir, videoID) {
-		fmt.Printf("[skip] Video %s/%s — already on disk\n", modelName, videoID)
-		return
+	// Skip if already downloaded.
+	if entries, err := os.ReadDir(modelDir); err == nil {
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), videoID) {
+				fmt.Printf("[skip] Video %s/%s — already on disk\n", modelName, videoID)
+				return
+			}
+		}
 	}
 
 	streamURL := crawlVideoStream(bytes.NewReader(rawBytes))
