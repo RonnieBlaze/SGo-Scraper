@@ -212,7 +212,6 @@ func crawlCandidImages(rawContents io.Reader) []string {
 }
 
 var dataOriginalRe = regexp.MustCompile(`data-original="(https?://[^"]+)"`)
-var imageURLRe = regexp.MustCompile(`https?://[^"'<>\s]+\.(?:jpg|jpeg|png|webp)(?:\?[^"'<>\s]*)?`)
 
 func crawlBlogImagesRegex(rawBytes []byte) []string {
 	seen := map[string]bool{}
@@ -222,16 +221,6 @@ func crawlBlogImagesRegex(rawBytes []byte) []string {
 			continue
 		}
 		u := html.UnescapeString(string(m[1]))
-		if u != "" && !seen[u] {
-			seen[u] = true
-			result = append(result, u)
-		}
-	}
-	if len(result) > 0 {
-		return result
-	}
-	for _, m := range imageURLRe.FindAll(rawBytes, -1) {
-		u := html.UnescapeString(string(m))
 		if u != "" && !seen[u] {
 			seen[u] = true
 			result = append(result, u)
