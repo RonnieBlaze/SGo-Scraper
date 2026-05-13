@@ -184,6 +184,133 @@ func crawlAlbumImages(rawContents io.Reader) []string {
 	}
 }
 
+// crawlCacheImages extracts permanent /cache/ image URLs from the page HTML.
+// Each <li class="photo-container"> has two URLs: the <a href> points to an
+// expiring /temp/ signed URL (403s after TTL), while the <img src> inside the
+// <noscript> block points to a permanent /cache/ URL. This function collects
+// the latter, which never require a fresh signed token.
+func crawlCacheImages(rawContents io.Reader) []string {
+	z := gohtml.NewTokenizer(rawContents)
+	var imagesFound []string
+	seen := map[string]bool{}
+	inImageSection := false
+	depth := 0 // article nesting depth
+	inArticle := false
+	for tt := z.Next(); ; tt = z.Next() {
+		if tt == gohtml.ErrorToken {
+			return imagesFound
+		}
+		switch tt {
+		case gohtml.StartTagToken, gohtml.SelfClosingTagToken:
+			t := z.Token()
+			switch t.Data {
+			case "article":
+				if !inArticle {
+					inArticle = true
+					depth = 1
+				} else {
+					depth++
+				}
+			case "section":
+				if !inArticle {
+					continue
+				}
+				for _, a := range t.Attr {
+					if a.Key == "class" && strings.Contains(a.Val, "image-section") {
+						inImageSection = true
+						break
+					}
+				}
+			case "noscript":
+				if !inImageSection {
+					continue
+				}
+				raw := getValueFromAttribute(t, "data-retina")
+				if raw == "" {
+					raw = getValueFromAttribute(t, "data-src")
+				}
+				if raw == "" {
+					continue
+				}
+				u := html.UnescapeString(raw)
+				if u != "" && !seen[u] {
+					seen[u] = true
+					imagesFound = append(imagesFound, u)
+				}
+			}
+		case gohtml.EndTagToken:
+			t := z.Token()
+			switch t.Data {
+			case "section":
+				inImageSection = false
+			case "article":
+				if inArticle {
+					depth--
+					if depth == 0 {
+						// Past the post's own article — stop.
+						return imagesFound
+					}
+				}
+			}
+		}
+	}
+}
+
+// getAlbumInfoImages fetches full-resolution image URLs for a multi-image candid
+// post via the get_album_info API. Returns nil for single-image posts (the HTML
+// crawl chain handles those fine) and on any error, so callers fall back
+// to the existing HTML-crawl chain unchanged.
+func getAlbumInfoImages(postID string) []string {
+	apiURL := fmt.Sprintf(
+		"https://www.suicidegirls.com/api/get_album_info/%s/?geometries=2432,1216",
+		postID,
+	)
+	client := newAuthedClient(apiURL)
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:150.0) Gecko/20100101 Firefox/150.0")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Referer", "https://www.suicidegirls.com/")
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		return nil
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Photos []struct {
+			AlbumPhotoID int               `json:"album_photo_id"`
+			URLs         map[string]string `json:"urls"`
+		} `json:"photos"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil
+	}
+	// Single-image posts are handled by crawlCacheImages; skip the API for them.
+	if len(result.Photos) <= 1 {
+		return nil
+	}
+	// Photos come back in insertion order from the API; sort by album_photo_id
+	// to guarantee correct sequence (the "number" field is always 0).
+	photos := result.Photos
+	for i := 1; i < len(photos); i++ {
+		for j := i; j > 0 && photos[j].AlbumPhotoID < photos[j-1].AlbumPhotoID; j-- {
+			photos[j], photos[j-1] = photos[j-1], photos[j]
+		}
+	}
+	var images []string
+	for _, p := range photos {
+		if u := p.URLs["2432"]; u != "" {
+			images = append(images, u)
+		} else if u := p.URLs["1216"]; u != "" {
+			images = append(images, u)
+		}
+	}
+	return images
+}
+
 func crawlCandidImages(rawContents io.Reader) []string {
 	z := gohtml.NewTokenizer(rawContents)
 	var imagesFound []string

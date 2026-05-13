@@ -150,7 +150,14 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 	}
 	postName = truncateName(postName, 80)
 
-	imagesFound := crawlAlbumImages(bytes.NewReader(rawBytes))
+	// Use the API first; it returns permanent /cache/ URLs, not expiring /temp/ ones.
+	imagesFound := getAlbumInfoImages(postID)
+	if len(imagesFound) == 0 {
+		imagesFound = crawlCacheImages(bytes.NewReader(rawBytes))
+	}
+	if len(imagesFound) == 0 {
+		imagesFound = crawlAlbumImages(bytes.NewReader(rawBytes))
+	}
 	if len(imagesFound) == 0 {
 		imagesFound = crawlCandidImages(bytes.NewReader(rawBytes))
 	}
