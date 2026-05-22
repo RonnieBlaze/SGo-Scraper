@@ -263,9 +263,26 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 	fmt.Printf("Group thread %s/%s (%s) — %d post(s) with images\n", groupName, threadID, threadTitle, len(buckets))
 	checkAndCreateDir(threadDir)
 
+	existingEntries, _ := os.ReadDir(threadDir)
+
 	for _, bucket := range buckets {
 		if len(bucket.Images) == 0 {
 			continue
+		}
+
+		if bucket.CommentID != "" {
+			prefix := bucket.CommentID + " - "
+			alreadyOnDisk := false
+			for _, e := range existingEntries {
+				if strings.HasPrefix(e.Name(), prefix) {
+					alreadyOnDisk = true
+					break
+				}
+			}
+			if alreadyOnDisk {
+				fmt.Printf("[skip] Group thread %s/%s — comment %s already on disk\n", groupName, threadID, bucket.CommentID)
+				continue
+			}
 		}
 
 		commentSnippet := truncateName(sanitizeName(bucket.CommentText), 60)
