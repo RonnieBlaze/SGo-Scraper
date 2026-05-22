@@ -106,21 +106,60 @@ func crawlGroupThreadImageBuckets(rawContents io.Reader) []GroupThreadImageBucke
 	return buckets
 }
 
+func getGroupThreadTotalComments(threadURL string) int {
+	rawBytes, err := io.ReadAll(getContents(strings.TrimSuffix(threadURL, "/") + "/comments/all?lazy=1"))
+	if err != nil {
+		return -1
+	}
+	m := regexp.MustCompile(`(?i)(\d[\d,]*)\s+comment`).FindSubmatch(rawBytes)
+	if len(m) < 2 {
+		return -1
+	}
+	n := strings.ReplaceAll(string(m[1]), ",", "")
+	v, err := strconv.Atoi(n)
+	if err != nil {
+		return -1
+	}
+	return v
+}
+
 func getAllGroupThreadImageBuckets(threadURL string) []GroupThreadImageBucket {
 	seenImgs := map[string]map[string]bool{}
 	bucketMeta := map[string]GroupThreadImageBucket{}
-	baseURL := strings.TrimSuffix(threadURL, "/") + "/comments/all?lazy=1"
+	base := strings.TrimSuffix(threadURL, "/")
+	baseURL := base + "/comments/all?lazy=1"
+	totalComments := -1
 	offset := 0
+	useFallback := false
 	for {
 		var pageURL string
-		if offset == 0 {
+		if useFallback {
+			pageURL = fmt.Sprintf("%s/comments/?offset=%d&count=600&lazy=1", base, offset)
+		} else if offset == 0 {
 			pageURL = baseURL
 		} else {
 			pageURL = fmt.Sprintf("%s&offset=%d", baseURL, offset)
 		}
+		fmt.Printf("[group] fetching offset=%d fallback=%t\n", offset, useFallback)
 		pageSource := getContents(pageURL)
-		rawBytes, _ := io.ReadAll(pageSource)
-		for _, bucket := range crawlGroupThreadImageBuckets(bytes.NewReader(rawBytes)) {
+		rawBytes, err := io.ReadAll(pageSource)
+		if err != nil {
+			if useFallback {
+				break
+			}
+			useFallback = true
+			offset = 0
+			if totalComments < 0 {
+				totalComments = getGroupThreadTotalComments(threadURL)
+				if totalComments > 0 {
+					fmt.Printf("[group] discovered total comments: %d\n", totalComments)
+				}
+			}
+			continue
+		}
+		pageBuckets := crawlGroupThreadImageBuckets(bytes.NewReader(rawBytes))
+		pageNewImages := 0
+		for _, bucket := range pageBuckets {
 			key := bucket.CommentID
 			if _, ok := seenImgs[key]; !ok {
 				seenImgs[key] = map[string]bool{}
@@ -139,12 +178,43 @@ func getAllGroupThreadImageBuckets(threadURL string) []GroupThreadImageBucket {
 			}
 			bucketMeta[key] = meta
 			for _, img := range bucket.Images {
-				seenImgs[key][img] = true
+				if !seenImgs[key][img] {
+					seenImgs[key][img] = true
+					pageNewImages++
+				}
 			}
+		}
+		seenPosts := len(bucketMeta)
+		totalImages := 0
+		for key := range bucketMeta {
+			totalImages += len(seenImgs[key])
+		}
+		if totalComments > 0 {
+			fmt.Printf("[group] progress: comments %d/%d, posts with images=%d, images=%d, last page posts=%d, last page new images=%d\n", offset, totalComments, seenPosts, totalImages, len(pageBuckets), pageNewImages)
+		} else {
+			fmt.Printf("[group] progress: comments offset=%d, posts with images=%d, images=%d, last page posts=%d, last page new images=%d\n", offset, seenPosts, totalImages, len(pageBuckets), pageNewImages)
+		}
+		if useFallback {
+			if len(pageBuckets) == 0 {
+				break
+			}
+			offset += 600
+			if totalComments > 0 && offset >= totalComments {
+				break
+			}
+			continue
 		}
 		nextOffset := getNextOffset(bytes.NewReader(rawBytes))
 		if nextOffset < 0 {
-			break
+			useFallback = true
+			offset = 0
+			if totalComments < 0 {
+				totalComments = getGroupThreadTotalComments(threadURL)
+				if totalComments > 0 {
+					fmt.Printf("[group] discovered total comments: %d\n", totalComments)
+				}
+			}
+			continue
 		}
 		offset = nextOffset
 	}
