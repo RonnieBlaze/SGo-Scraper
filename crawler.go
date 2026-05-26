@@ -126,6 +126,7 @@ func getGroupThreadTotalComments(threadURL string) int {
 func getAllGroupThreadImageBuckets(threadURL string) []GroupThreadImageBucket {
 	seenImgs := map[string]map[string]bool{}
 	bucketMeta := map[string]GroupThreadImageBucket{}
+	var bucketOrder []string
 	base := strings.TrimSuffix(threadURL, "/")
 	baseURL := base + "/comments/all?lazy=1"
 	totalComments := -1
@@ -168,6 +169,7 @@ func getAllGroupThreadImageBuckets(threadURL string) []GroupThreadImageBucket {
 					Username:    bucket.Username,
 					CommentText: bucket.CommentText,
 				}
+				bucketOrder = append(bucketOrder, key)
 			}
 			meta := bucketMeta[key]
 			if meta.Username == "" && bucket.Username != "" {
@@ -206,20 +208,27 @@ func getAllGroupThreadImageBuckets(threadURL string) []GroupThreadImageBucket {
 		}
 		nextOffset := getNextOffset(bytes.NewReader(rawBytes))
 		if nextOffset < 0 {
-			useFallback = true
-			offset = 0
-			if totalComments < 0 {
-				totalComments = getGroupThreadTotalComments(threadURL)
-				if totalComments > 0 {
-					fmt.Printf("[group] discovered total comments: %d\n", totalComments)
+			if len(pageBuckets) == 0 {
+				useFallback = true
+				offset = 0
+				if totalComments < 0 {
+					totalComments = getGroupThreadTotalComments(threadURL)
+					if totalComments > 0 {
+						fmt.Printf("[group] discovered total comments: %d\n", totalComments)
+					}
 				}
+				continue
 			}
-			continue
+			break
+		}
+		if nextOffset == offset {
+			break
 		}
 		offset = nextOffset
 	}
 	var result []GroupThreadImageBucket
-	for key, meta := range bucketMeta {
+	for _, key := range bucketOrder {
+		meta := bucketMeta[key]
 		for img := range seenImgs[key] {
 			meta.Images = append(meta.Images, img)
 		}
