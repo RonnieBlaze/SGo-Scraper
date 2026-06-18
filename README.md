@@ -17,14 +17,14 @@ Just run by appending the URL of the album.
 ```
 git clone https://github.com/Osuka42g/SGo-Scraper.git
 cd SGo-Scraper
-~~go get~~ _Gives error about missing go.mod_
+go get (Gives error about missing go.mod)
 cp .env.example .env
 ```
 
 Open `.env` and fill _SESSIONIDTOKEN_ and others with [your own Tokens](#getting-token).
 
 ```
-go env -w GO111MODULE=auto _put go into legacy mode to be able to build_
+go env -w GO111MODULE=auto (Puts go into legacy mode to be able to build)
 go build
 ./SGo-Scraper http://suicidegirls.com/full-url-to-the-suicidegirls-album
 ```
