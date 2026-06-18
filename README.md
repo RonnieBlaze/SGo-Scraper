@@ -10,19 +10,21 @@ Just run by appending the URL of the album.
 
 ## Requirements
 - Suicide Girls account.
-- Go 1.9
+- Go 1.26.4
+
 
 ## Usage
 ```
 git clone https://github.com/Osuka42g/SGo-Scraper.git
 cd SGo-Scraper
-go get
+~~go get~~ _Gives error about missing go.mod_
 cp .env.example .env
 ```
 
 Open `.env` and fill _SESSIONIDTOKEN_ and others with [your own Tokens](#getting-token).
 
 ```
+go env -w GO111MODULE=auto _put go into legacy mode to be able to build_
 go build
 ./SGo-Scraper http://suicidegirls.com/full-url-to-the-suicidegirls-album
 ```
