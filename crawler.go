@@ -787,7 +787,13 @@ func sanitizeName(s string) string {
 		"/", "-", "\\", "-", ":", "-", "*", "-",
 		"?", "", `"`, "", "<", "", ">", "", "|", "-",
 	)
-	return strings.TrimSpace(replacer.Replace(s))
+
+	s = strings.TrimSpace(replacer.Replace(s))
+
+	// Windows does not allow filenames/folders ending in periods or spaces.
+	s = strings.TrimRight(s, ". ")
+
+	return s
 }
 
 func truncateName(s string, maxLen int) string {
