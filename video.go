@@ -73,6 +73,7 @@ func parseVideoInfo(videoURL string, rawBytes []byte, expectedModel string) (str
 	}
 
 	modelName := titleCaseModelName(expectedModel)
+	modelName = sanitizeName(modelName)
 	if modelName == "Unknown" || modelName == "" {
 		title := strings.TrimSpace(getTitle(bytes.NewReader(rawBytes)))
 		if idx := strings.LastIndex(title, " by "); idx != -1 {
@@ -121,6 +122,18 @@ func downloadVideoPost(videoURL string, downloadsDir string, expectedModel strin
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		fmt.Printf("Video %s/%s — ffmpeg failed: %v\n", modelName, videoID, err)
+		return
+	}
+
+	info, err := os.Stat(output)
+	if err != nil {
+		fmt.Printf("Video %s/%s — output file missing\n", modelName, videoID)
+		return
+	}
+
+	if info.Size() == 0 {
+		fmt.Printf("Video %s/%s — output file is empty\n", modelName, videoID)
+		os.Remove(output)
 		return
 	}
 
