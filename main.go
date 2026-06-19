@@ -54,11 +54,16 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 	var mu sync.Mutex
 	imagesDownloaded := make([]string, len(imagesFound))
 	total := len(imagesFound)
+	sem := make(chan struct{}, 10) // added limit to 10 simultaneous downloads
 
 	for i, imageURL := range imagesFound {
 		wg.Add(1)
 		go func(i int, imageURL string) {
 			defer wg.Done()
+			
+			sem <- struct{}{} // added limit to 10 simultaneous downloads
+			defer func() { <-sem }() // added limit to 10 simultaneous downloads
+			
 			imageOutput := albumDir + "/" + albumID + " - " + fmt.Sprintf("%04d", i+1) + ".jpg"
 			b, err := saveImage(imageURL, imageOutput)
 			mu.Lock()
@@ -193,6 +198,7 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 			return
 		}
 		fmt.Printf("[0001/0001] — %.2f MB\n", float64(b)/1024/1024)
+		fmt.Println("Done!")
 		return
 	}
 
@@ -202,11 +208,16 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	total := len(imagesFound)
+	sem := make(chan struct{}, 10) // added limit to 10 simultaneous downloads
 
 	for i, imageURL := range imagesFound {
 		wg.Add(1)
 		go func(i int, imageURL string) {
 			defer wg.Done()
+			
+			sem <- struct{}{} // added limit to 10 simultaneous downloads
+			defer func() { <-sem }() // added limit to 10 simultaneous downloads
+			
 			imageOutput := fmt.Sprintf("%s/%s - %s - %04d.jpg", postDir, postID, postName, i+1)
 			b, err := saveImage(imageURL, imageOutput)
 			mu.Lock()
@@ -220,6 +231,7 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 	}
 
 	wg.Wait()
+	fmt.Println("Done!")
 }
 
 func downloadBlogPost(postURL string, downloadsDir string) {
@@ -307,10 +319,17 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 
 		var wg sync.WaitGroup
 		var mu sync.Mutex
+		
+		sem := make(chan struct{}, 10) // added limit to 10 simultaneous downloads
+		
 		for i, imageURL := range bucket.Images {
 			wg.Add(1)
 			go func(i int, imageURL string) {
 				defer wg.Done()
+				
+				sem <- struct{}{} // added limit to 10 simultaneous downloads
+				defer func() { <-sem }() // added limit to 10 simultaneous downloads
+				
 				imageOutput := fmt.Sprintf("%s/%s - %04d.jpg", threadDir, baseName, i+1)
 				b, err := saveImage(imageURL, imageOutput)
 				mu.Lock()
