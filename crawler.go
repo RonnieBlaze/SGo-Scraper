@@ -107,7 +107,8 @@ func crawlGroupThreadImageBuckets(rawContents io.Reader) []GroupThreadImageBucke
 }
 
 func getGroupThreadTotalComments(threadURL string) int {
-	rawBytes, err := io.ReadAll(getContents(strings.TrimSuffix(threadURL, "/") + "/comments/all?lazy=1"))
+	// REFACTORED: Uses the updated getContents returning ([]byte, error) and closes response body internally
+	rawBytes, err := getContents(strings.TrimSuffix(threadURL, "/") + "/comments/all?lazy=1")
 	if err != nil {
 		return -1
 	}
@@ -142,8 +143,8 @@ func getAllGroupThreadImageBuckets(threadURL string) []GroupThreadImageBucket {
 			pageURL = fmt.Sprintf("%s&offset=%d", baseURL, offset)
 		}
 		fmt.Printf("[group] fetching offset=%d fallback=%t\n", offset, useFallback)
-		pageSource := getContents(pageURL)
-		rawBytes, err := io.ReadAll(pageSource)
+		// REFACTORED: Uses the updated getContents returning ([]byte, error) and closes response body internally
+		rawBytes, err := getContents(pageURL)
 		if err != nil {
 			if useFallback {
 				break
@@ -632,8 +633,12 @@ func getAllAlbumLinks(modelURL string, modelName string) []string {
 		} else {
 			pageURL = fmt.Sprintf("%s?offset=%d", modelURL, offset)
 		}
-		pageSource := getContents(pageURL)
-		rawBytes, _ := io.ReadAll(pageSource)
+		// REFACTORED: Uses the updated getContents returning ([]byte, error) and closes response body internally
+		rawBytes, err := getContents(pageURL)
+		if err != nil {
+			fmt.Printf("Warning: failed to fetch album links at offset %d: %v\n", offset, err)
+			break
+		}
 		for _, link := range crawlAlbums(bytes.NewReader(rawBytes), modelName) {
 			if !seen[link] {
 				seen[link] = true
@@ -660,8 +665,12 @@ func getAllMemberAlbumLinks(modelURL string, modelName string) []string {
 		} else {
 			pageURL = fmt.Sprintf("%s?offset=%d", modelURL, offset)
 		}
-		pageSource := getContents(pageURL)
-		rawBytes, _ := io.ReadAll(pageSource)
+		// REFACTORED: Uses the updated getContents returning ([]byte, error) and closes response body internally
+		rawBytes, err := getContents(pageURL)
+		if err != nil {
+			fmt.Printf("Warning: failed to fetch member album links at offset %d: %v\n", offset, err)
+			break
+		}
 		for _, link := range crawlMemberAlbums(bytes.NewReader(rawBytes), modelName) {
 			if !seen[link] {
 				seen[link] = true
@@ -688,8 +697,12 @@ func getAllBlogLinks(modelURL string, modelName string) []string {
 		} else {
 			pageURL = fmt.Sprintf("%s?offset=%d", modelURL, offset)
 		}
-		pageSource := getContents(pageURL)
-		rawBytes, _ := io.ReadAll(pageSource)
+		// REFACTORED: Uses the updated getContents returning ([]byte, error) and closes response body internally
+		rawBytes, err := getContents(pageURL)
+		if err != nil {
+			fmt.Printf("Warning: failed to fetch blog links at offset %d: %v\n", offset, err)
+			break
+		}
 		for _, link := range crawlBlogLinks(bytes.NewReader(rawBytes), modelName) {
 			if !seen[link] {
 				seen[link] = true
@@ -716,8 +729,12 @@ func getAllVideoLinks(modelURL string) []string {
 		} else {
 			pageURL = fmt.Sprintf("%s?offset=%d", modelURL, offset)
 		}
-		pageSource := getContents(pageURL)
-		rawBytes, _ := io.ReadAll(pageSource)
+		// REFACTORED: Uses the updated getContents returning ([]byte, error) and closes response body internally
+		rawBytes, err := getContents(pageURL)
+		if err != nil {
+			fmt.Printf("Warning: failed to fetch video links at offset %d: %v\n", offset, err)
+			break
+		}
 		for _, link := range crawlVideoLinks(bytes.NewReader(rawBytes)) {
 			if !seen[link] {
 				seen[link] = true
@@ -859,18 +876,29 @@ func newAuthedClient(target string) http.Client {
 	return http.Client{Jar: jar}
 }
 
-func getContents(link string) io.Reader {
+// REFACTORED: getContents now returns ([]byte, error) and closes the response body internally to prevent resource/connection leaks.
+func getContents(link string) ([]byte, error) {
 	client := newAuthedClient(link)
-	req, _ := http.NewRequest("GET", link, nil)
+	req, err := http.NewRequest("GET", link, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request for %s: %w", link, err)
+	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
 	req.Header.Set("Referer", "https://www.suicidegirls.com/")
+
 	resp, err := client.Do(req)
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("request to %s failed: %w", link, err)
 	}
-	return resp.Body
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("request to %s failed with status: %s", link, resp.Status)
+	}
+
+	return io.ReadAll(resp.Body)
 }
 
 func getValueFromAttribute(t gohtml.Token, attr string) string {

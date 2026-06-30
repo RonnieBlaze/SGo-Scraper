@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -12,10 +13,11 @@ import (
 )
 
 func downloadAlbum(albumURL string, downloadsDir string, finalizeWithZip bool, isCandid bool) {
-	pageSource := getContents(albumURL)
-	rawBytes, err := io.ReadAll(pageSource)
+	// REFACTORED: Uses the updated getContents returning ([]byte, error) and closes response body internally
+	rawBytes, err := getContents(albumURL)
 	if err != nil {
-		panic(err)
+		fmt.Printf("Error downloading album page source for %s: %v\n", albumURL, err)
+		return
 	}
 
 	info := parsePageInfo(getTitle(bytes.NewReader(rawBytes)))
@@ -47,7 +49,9 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 
 	fmt.Printf("Found %q set from %s — %d image(s). Downloading...\n", info.AlbumName, info.ModelName, len(imagesFound))
 
-	albumDir := downloadsDir + "/photos/" + info.ModelName + " - " + info.AlbumName
+	// REFACTORED: Use cross-platform filepath.Join instead of string concatenation
+	albumDir := filepath.Join(downloadsDir, "photos", info.ModelName+" - "+info.AlbumName)
+	fmt.Println("AlbumDir:", albumDir) //debug info for looking directory name.
 	checkAndCreateDir(albumDir)
 
 	var wg sync.WaitGroup
@@ -64,7 +68,8 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 			sem <- struct{}{} // added limit to 10 simultaneous downloads
 			defer func() { <-sem }() // added limit to 10 simultaneous downloads
 			
-			imageOutput := albumDir + "/" + albumID + " - " + fmt.Sprintf("%04d", i+1) + ".jpg"
+			// REFACTORED: Use cross-platform filepath.Join instead of string concatenation
+			imageOutput := filepath.Join(albumDir, albumID+" - "+fmt.Sprintf("%04d", i+1)+".jpg")
 			b, err := saveImage(imageURL, imageOutput)
 			mu.Lock()
 			defer mu.Unlock()
@@ -96,7 +101,8 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 				filtered = append(filtered, f)
 			}
 		}
-		if err := ZipFiles(albumDir+"/"+info.AlbumName+".zip", filtered); err != nil {
+		// REFACTORED: Use cross-platform filepath.Join instead of string concatenation
+		if err := ZipFiles(filepath.Join(albumDir, info.AlbumName+".zip"), filtered); err != nil {
 			panic(err)
 		}
 	}
@@ -174,7 +180,8 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 		return
 	}
 
-	modelDir := downloadsDir + "/candids/" + modelName
+	// REFACTORED: Use cross-platform filepath.Join instead of string concatenation
+	modelDir := filepath.Join(downloadsDir, "candids", modelName)
 
 	// Skip if already downloaded.
 	if entries, err := os.ReadDir(modelDir); err == nil {
@@ -185,13 +192,14 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 			}
 		}
 	}
-
+	fmt.Println("ModelDir:", modelDir) //debug info for looking directory name.
 	checkAndCreateDir(modelDir)
 
 	fmt.Printf("Candid post %s/%s (%s) — %d image(s)\n", modelName, postID, postName, len(imagesFound))
 
 	if len(imagesFound) == 1 {
-		imageOutput := fmt.Sprintf("%s/%s - %s - 0001.jpg", modelDir, postID, postName)
+		// REFACTORED: Use cross-platform filepath.Join instead of string concatenation/formatting
+		imageOutput := filepath.Join(modelDir, fmt.Sprintf("%s - %s - 0001.jpg", postID, postName))
 		b, err := saveImage(imagesFound[0], imageOutput)
 		if err != nil {
 			fmt.Printf("[0001/0001] — error: %v\n", err)
@@ -202,7 +210,9 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 		return
 	}
 
-	postDir := fmt.Sprintf("%s/%s - %s", modelDir, postID, postName)
+	// REFACTORED: Use cross-platform filepath.Join instead of string concatenation/formatting
+	postDir := filepath.Join(modelDir, fmt.Sprintf("%s - %s", postID, postName))
+	fmt.Println("PostDir:", postDir) //debug info for looking directory name.
 	checkAndCreateDir(postDir)
 
 	var wg sync.WaitGroup
@@ -218,7 +228,8 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 			sem <- struct{}{} // added limit to 10 simultaneous downloads
 			defer func() { <-sem }() // added limit to 10 simultaneous downloads
 			
-			imageOutput := fmt.Sprintf("%s/%s - %s - %04d.jpg", postDir, postID, postName, i+1)
+			// REFACTORED: Use cross-platform filepath.Join instead of string concatenation/formatting
+			imageOutput := filepath.Join(postDir, fmt.Sprintf("%s - %s - %04d.jpg", postID, postName, i+1))
 			b, err := saveImage(imageURL, imageOutput)
 			mu.Lock()
 			defer mu.Unlock()
@@ -239,10 +250,11 @@ func downloadBlogPost(postURL string, downloadsDir string) {
 }
 
 func downloadGroupThread(threadURL string, downloadsDir string) {
-	pageSource := getContents(threadURL)
-	rawBytes, err := io.ReadAll(pageSource)
+	// REFACTORED: Uses the updated getContents returning ([]byte, error) and closes response body internally
+	rawBytes, err := getContents(threadURL)
 	if err != nil {
-		panic(err)
+		fmt.Printf("Error downloading group thread page source for %s: %v\n", threadURL, err)
+		return
 	}
 
 	parts := strings.Split(strings.TrimSuffix(threadURL, "/"), "/")
@@ -264,7 +276,8 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 	}
 	threadTitle = truncateName(threadTitle, 60)
 
-	threadDir := fmt.Sprintf("%s/groups/%s/%s - %s", downloadsDir, groupName, threadID, threadTitle)
+	// REFACTORED: Use cross-platform filepath.Join instead of string concatenation/formatting
+	threadDir := filepath.Join(downloadsDir, "groups", groupName, fmt.Sprintf("%s - %s", threadID, threadTitle))
 
 	buckets := getAllGroupThreadImageBuckets(threadURL)
 	if len(buckets) == 0 {
@@ -273,6 +286,7 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 	}
 
 	fmt.Printf("Group thread %s/%s (%s) — %d post(s) with images\n", groupName, threadID, threadTitle, len(buckets))
+	fmt.Println("ThreadDir:", threadDir) //debug info for looking directory name.
 	checkAndCreateDir(threadDir)
 
 	existingEntries, _ := os.ReadDir(threadDir)
@@ -307,7 +321,8 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 
 		total := len(bucket.Images)
 		if total == 1 {
-			imageOutput := fmt.Sprintf("%s/%s - 0001.jpg", threadDir, baseName)
+			// REFACTORED: Use cross-platform filepath.Join instead of string concatenation/formatting
+			imageOutput := filepath.Join(threadDir, baseName+" - 0001.jpg")
 			b, err := saveImage(bucket.Images[0], imageOutput)
 			if err != nil {
 				fmt.Printf("%s [0001/0001] — error: %v\n", baseName, err)
@@ -330,7 +345,8 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 				sem <- struct{}{} // added limit to 10 simultaneous downloads
 				defer func() { <-sem }() // added limit to 10 simultaneous downloads
 				
-				imageOutput := fmt.Sprintf("%s/%s - %04d.jpg", threadDir, baseName, i+1)
+				// REFACTORED: Use cross-platform filepath.Join instead of string concatenation/formatting
+				imageOutput := filepath.Join(threadDir, fmt.Sprintf("%s - %04d.jpg", baseName, i+1))
 				b, err := saveImage(imageURL, imageOutput)
 				mu.Lock()
 				defer mu.Unlock()
@@ -360,6 +376,7 @@ func main() {
 	albumURL := args[1]
 	finalizeWithZip := args[len(args)-1] == "-z"
 
+	fmt.Println("DownloadsDir:", downloadsDir) //debug info for looking directory name.
 	checkAndCreateDir(downloadsDir)
 
 	switch {

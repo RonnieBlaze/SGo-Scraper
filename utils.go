@@ -19,15 +19,7 @@ func checkAndCreateDir(path string) {
 		os.MkdirAll(path, os.ModePerm)
 	}
 }
-
-func digitsLen(n int) int {
-	return len(strconv.Itoa(n))
-}
-
-func leftPad(s string, padStr string, pLen int) string {
-	return strings.Repeat(padStr, pLen-len(s)) + s
-}
-
+// REFACTORED: Removed unused digitsLen and leftPad helper functions.
 // newCandidClient returns an http.Client that:
 //   - carries the session cookies (so /temp/ signed URLs are authorised)
 //   - re-injects all request headers on every redirect hop (so Referer and
@@ -52,7 +44,7 @@ func newCandidClient(referer string) *http.Client {
 
 	jar, _ := cookiejar.New(nil)
 	cookieData := []struct{ name, value string }{
-		{"sessionid", os.Getenv("SESSIONIDTOKEN")},
+		{"sessid", os.Getenv("SESSIONIDTOKEN")},
 		{"sgcsrftoken", os.Getenv("SGCSRFTOKEN")},
 		{"rscivid", os.Getenv("RSCIVID")},
 	}
