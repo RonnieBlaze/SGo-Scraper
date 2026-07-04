@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -87,16 +86,14 @@ func parseVideoInfo(videoURL string, rawBytes []byte, expectedModel string) (str
 }
 
 func downloadVideoPost(videoURL string, downloadsDir string, expectedModel string) {
-	// REFACTORED: Uses the updated getContents returning ([]byte, error) and closes response body internally
-	rawBytes, err := getContents(videoURL)
+	pageSource := getContents(videoURL)
+	rawBytes, err := io.ReadAll(pageSource)
 	if err != nil {
-		fmt.Printf("Error downloading video page source for %s: %v\n", videoURL, err)
-		return
+		panic(err)
 	}
 
 	videoID, postTitle, modelName := parseVideoInfo(videoURL, rawBytes, expectedModel)
-	// REFACTORED: Use cross-platform filepath.Join instead of string concatenation
-	modelDir := filepath.Join(downloadsDir, "candids", modelName)
+	modelDir := downloadsDir + "/candids/" + modelName
 
 	// Skip if already downloaded.
 	if entries, err := os.ReadDir(modelDir); err == nil {
@@ -114,15 +111,8 @@ func downloadVideoPost(videoURL string, downloadsDir string, expectedModel strin
 		return
 	}
 
-	// REFACTORED: Verify ffmpeg is installed/PATH before starting download
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		fmt.Printf("Video %s/%s — ffmpeg is not installed or not in PATH, skipping. Please install ffmpeg to download videos.\n", modelName, videoID)
-		return
-	}
-
 	checkAndCreateDir(modelDir)
-	// REFACTORED: Use cross-platform filepath.Join instead of string formatting/concatenation
-	output := filepath.Join(modelDir, fmt.Sprintf("%s - %s.mp4", videoID, postTitle))
+	output := fmt.Sprintf("%s/%s - %s.mp4", modelDir, videoID, postTitle)
 
 	fmt.Printf("Video post %s/%s (%s) — downloading...\n", modelName, videoID, postTitle)
 	headers := "Referer: https://www.suicidegirls.com/\r\n" +
@@ -147,5 +137,5 @@ func downloadVideoPost(videoURL string, downloadsDir string, expectedModel strin
 		return
 	}
 
-	fmt.Println("Done!")
+	fmt.Println("Done!\n")
 }
