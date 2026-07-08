@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -18,14 +17,6 @@ func checkAndCreateDir(path string) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		os.MkdirAll(path, os.ModePerm)
 	}
-}
-
-func digitsLen(n int) int {
-	return len(strconv.Itoa(n))
-}
-
-func leftPad(s string, padStr string, pLen int) string {
-	return strings.Repeat(padStr, pLen-len(s)) + s
 }
 
 // newCandidClient returns an http.Client that:
@@ -52,7 +43,7 @@ func newCandidClient(referer string) *http.Client {
 
 	jar, _ := cookiejar.New(nil)
 	cookieData := []struct{ name, value string }{
-		{"sessionid", os.Getenv("SESSIONIDTOKEN")},
+		{"sessid", os.Getenv("SESSIONIDTOKEN")},
 		{"sgcsrftoken", os.Getenv("SGCSRFTOKEN")},
 		{"rscivid", os.Getenv("RSCIVID")},
 	}

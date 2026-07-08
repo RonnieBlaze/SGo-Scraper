@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"path/filepath"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -47,24 +49,27 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 
 	fmt.Printf("Found %q set from %s — %d image(s). Downloading...\n", info.AlbumName, info.ModelName, len(imagesFound))
 
-	albumDir := downloadsDir + "/photos/" + info.ModelName + " - " + info.AlbumName
+	albumDir := filepath.Join(downloadsDir, info.ModelName, "photos", info.ModelName+" - "+info.AlbumName)
+	fmt.Println("AlbumDir:", albumDir) //debug info for looking directory name.
 	checkAndCreateDir(albumDir)
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	imagesDownloaded := make([]string, len(imagesFound))
 	total := len(imagesFound)
-	sem := make(chan struct{}, 10) // added limit to 10 simultaneous downloads
+	sem := make(chan struct{}, 5) // limit to 5 simultaneous downloads
 
 	for i, imageURL := range imagesFound {
+		sem <- struct{}{} // acquire slot before spawning
+		if i > 0 {
+			time.Sleep(500 * time.Millisecond) // delay between download starts
+		}
 		wg.Add(1)
 		go func(i int, imageURL string) {
 			defer wg.Done()
+			defer func() { <-sem }() // release slot when finished
 			
-			sem <- struct{}{} // added limit to 10 simultaneous downloads
-			defer func() { <-sem }() // added limit to 10 simultaneous downloads
-			
-			imageOutput := albumDir + "/" + albumID + " - " + fmt.Sprintf("%04d", i+1) + ".jpg"
+			imageOutput := filepath.Join(albumDir, fmt.Sprintf("%s - %04d.jpg", albumID, i+1))
 			b, err := saveImage(imageURL, imageOutput)
 			mu.Lock()
 			defer mu.Unlock()
@@ -96,12 +101,12 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 				filtered = append(filtered, f)
 			}
 		}
-		if err := ZipFiles(albumDir+"/"+info.AlbumName+".zip", filtered); err != nil {
+		if err := ZipFiles(filepath.Join(albumDir, info.AlbumName+".zip"), filtered); err != nil {
 			panic(err)
 		}
 	}
 
-	fmt.Println("Done!")
+	fmt.Println("Done!\n")
 }
 
 func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloadsDir string) {
@@ -174,7 +179,7 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 		return
 	}
 
-	modelDir := downloadsDir + "/candids/" + modelName
+	modelDir := filepath.Join(downloadsDir, modelName, "candids")
 
 	// Skip if already downloaded.
 	if entries, err := os.ReadDir(modelDir); err == nil {
@@ -185,40 +190,43 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 			}
 		}
 	}
-
+	fmt.Println("ModelDir:", modelDir) //debug info for looking directory name.
 	checkAndCreateDir(modelDir)
 
 	fmt.Printf("Candid post %s/%s (%s) — %d image(s)\n", modelName, postID, postName, len(imagesFound))
 
 	if len(imagesFound) == 1 {
-		imageOutput := fmt.Sprintf("%s/%s - %s - 0001.jpg", modelDir, postID, postName)
+		imageOutput := filepath.Join(modelDir, fmt.Sprintf("%s - %s - 0001.jpg", postID, postName))
 		b, err := saveImage(imagesFound[0], imageOutput)
 		if err != nil {
 			fmt.Printf("[0001/0001] — error: %v\n", err)
 			return
 		}
 		fmt.Printf("[0001/0001] — %.2f MB\n", float64(b)/1024/1024)
-		fmt.Println("Done!")
+		fmt.Println("Done!\n")
 		return
 	}
 
-	postDir := fmt.Sprintf("%s/%s - %s", modelDir, postID, postName)
+	postDir := filepath.Join(modelDir, fmt.Sprintf("%s - %s", postID, postName))
+	fmt.Println("PostDir:", postDir) //debug info for looking directory name.
 	checkAndCreateDir(postDir)
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	total := len(imagesFound)
-	sem := make(chan struct{}, 10) // added limit to 10 simultaneous downloads
+	sem := make(chan struct{}, 5) // limit to 5 simultaneous downloads
 
 	for i, imageURL := range imagesFound {
+		sem <- struct{}{} // acquire slot before spawning
+		if i > 0 {
+			time.Sleep(500 * time.Millisecond) // delay between download starts
+		}
 		wg.Add(1)
 		go func(i int, imageURL string) {
 			defer wg.Done()
+			defer func() { <-sem }() // release slot when finished
 			
-			sem <- struct{}{} // added limit to 10 simultaneous downloads
-			defer func() { <-sem }() // added limit to 10 simultaneous downloads
-			
-			imageOutput := fmt.Sprintf("%s/%s - %s - %04d.jpg", postDir, postID, postName, i+1)
+			imageOutput := filepath.Join(postDir, fmt.Sprintf("%s - %s - %04d.jpg", postID, postName, i+1))
 			b, err := saveImage(imageURL, imageOutput)
 			mu.Lock()
 			defer mu.Unlock()
@@ -231,7 +239,7 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 	}
 
 	wg.Wait()
-	fmt.Println("Done!")
+	fmt.Println("Done!\n")
 }
 
 func downloadBlogPost(postURL string, downloadsDir string) {
@@ -273,6 +281,7 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 	}
 
 	fmt.Printf("Group thread %s/%s (%s) — %d post(s) with images\n", groupName, threadID, threadTitle, len(buckets))
+	fmt.Println("ThreadDir:", threadDir) //debug info for looking directory name.
 	checkAndCreateDir(threadDir)
 
 	existingEntries, _ := os.ReadDir(threadDir)
@@ -320,15 +329,17 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 		var wg sync.WaitGroup
 		var mu sync.Mutex
 		
-		sem := make(chan struct{}, 10) // added limit to 10 simultaneous downloads
+		sem := make(chan struct{}, 5) // limit to 5 simultaneous downloads
 		
 		for i, imageURL := range bucket.Images {
+			sem <- struct{}{} // acquire slot before spawning
+			if i > 0 {
+				time.Sleep(500 * time.Millisecond) // delay between download starts
+			}
 			wg.Add(1)
 			go func(i int, imageURL string) {
 				defer wg.Done()
-				
-				sem <- struct{}{} // added limit to 10 simultaneous downloads
-				defer func() { <-sem }() // added limit to 10 simultaneous downloads
+				defer func() { <-sem }() // release slot when finished
 				
 				imageOutput := fmt.Sprintf("%s/%s - %04d.jpg", threadDir, baseName, i+1)
 				b, err := saveImage(imageURL, imageOutput)
@@ -360,6 +371,7 @@ func main() {
 	albumURL := args[1]
 	finalizeWithZip := args[len(args)-1] == "-z"
 
+	fmt.Println("DownloadsDir:", downloadsDir) //debug info for looking directory name.
 	checkAndCreateDir(downloadsDir)
 
 	switch {
@@ -396,9 +408,19 @@ func main() {
 
 		seen := map[string]bool{}
 
+		photosetLinks := getAllAlbumLinks(base+"/photos/view/photosets/", modelName)
+		fmt.Println("Found", len(photosetLinks), "photosets")
+		for _, link := range photosetLinks {
+			seen[link] = true
+			downloadAlbum(link, downloadsDir, finalizeWithZip, false)
+		}
+
 		candidLinks := getAllAlbumLinks(base+"/photos/view/candids/", modelName)
 		fmt.Println("Found", len(candidLinks), "candid posts")
 		for _, link := range candidLinks {
+			if seen[link] {
+				continue
+			}
 			seen[link] = true
 			downloadAlbum(link, downloadsDir, finalizeWithZip, true)
 		}
@@ -406,6 +428,9 @@ func main() {
 		videoLinks := getAllVideoLinks(base + "/videos/")
 		fmt.Println("Found", len(videoLinks), "videos")
 		for _, link := range videoLinks {
+			if seen[link] {
+				continue
+			}
 			seen[link] = true
 			downloadVideoPost(link, downloadsDir, modelName)
 		}
@@ -420,6 +445,6 @@ func main() {
 			downloadBlogPost(link, downloadsDir)
 		}
 
-		fmt.Println("Done!")
+		fmt.Println("Done!\n")
 	}
 }

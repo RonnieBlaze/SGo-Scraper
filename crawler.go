@@ -788,7 +788,11 @@ func sanitizeName(s string) string {
 		"?", "", `"`, "", "<", "", ">", "", "|", "-",
 	)
 
-	s = strings.TrimSpace(replacer.Replace(s))
+	s = replacer.Replace(s)
+
+	// Collapse all whitespaces (including newlines, tabs, carriage returns)
+	// and trim leading/trailing space.
+	s = strings.Join(strings.Fields(s), " ")
 
 	// Windows does not allow filenames/folders ending in periods or spaces.
 	s = strings.TrimRight(s, ". ")

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -93,7 +94,7 @@ func downloadVideoPost(videoURL string, downloadsDir string, expectedModel strin
 	}
 
 	videoID, postTitle, modelName := parseVideoInfo(videoURL, rawBytes, expectedModel)
-	modelDir := downloadsDir + "/candids/" + modelName
+	modelDir := filepath.Join(downloadsDir, modelName, "videos")
 
 	// Skip if already downloaded.
 	if entries, err := os.ReadDir(modelDir); err == nil {
@@ -112,7 +113,7 @@ func downloadVideoPost(videoURL string, downloadsDir string, expectedModel strin
 	}
 
 	checkAndCreateDir(modelDir)
-	output := fmt.Sprintf("%s/%s - %s.mp4", modelDir, videoID, postTitle)
+	output := filepath.Join(modelDir, fmt.Sprintf("%s - %s.mp4", videoID, postTitle))
 
 	fmt.Printf("Video post %s/%s (%s) — downloading...\n", modelName, videoID, postTitle)
 	headers := "Referer: https://www.suicidegirls.com/\r\n" +
@@ -137,5 +138,5 @@ func downloadVideoPost(videoURL string, downloadsDir string, expectedModel strin
 		return
 	}
 
-	fmt.Println("Done!")
+	fmt.Println("Done!\n")
 }
