@@ -107,10 +107,7 @@ func crawlGroupThreadImageBuckets(rawContents io.Reader) []GroupThreadImageBucke
 }
 
 func getGroupThreadTotalComments(threadURL string) int {
-	rawBytes, err := io.ReadAll(getContents(strings.TrimSuffix(threadURL, "/") + "/comments/all?lazy=1"))
-	if err != nil {
-		return -1
-	}
+	rawBytes := getContents(strings.TrimSuffix(threadURL, "/") + "/comments/all?lazy=1")
 	m := regexp.MustCompile(`(?i)(\d[\d,]*)\s+comment`).FindSubmatch(rawBytes)
 	if len(m) < 2 {
 		return -1
@@ -142,8 +139,7 @@ func getAllGroupThreadImageBuckets(threadURL string) []GroupThreadImageBucket {
 			pageURL = fmt.Sprintf("%s&offset=%d", baseURL, offset)
 		}
 		fmt.Printf("[group] fetching offset=%d fallback=%t\n", offset, useFallback)
-		pageSource := getContents(pageURL)
-		rawBytes, err := io.ReadAll(pageSource)
+		rawBytes, err := getContentsE(pageURL)
 		if err != nil {
 			if useFallback {
 				break
@@ -632,8 +628,7 @@ func getAllAlbumLinks(modelURL string, modelName string) []string {
 		} else {
 			pageURL = fmt.Sprintf("%s?offset=%d", modelURL, offset)
 		}
-		pageSource := getContents(pageURL)
-		rawBytes, _ := io.ReadAll(pageSource)
+		rawBytes := getContents(pageURL)
 		for _, link := range crawlAlbums(bytes.NewReader(rawBytes), modelName) {
 			if !seen[link] {
 				seen[link] = true
@@ -660,8 +655,7 @@ func getAllMemberAlbumLinks(modelURL string, modelName string) []string {
 		} else {
 			pageURL = fmt.Sprintf("%s?offset=%d", modelURL, offset)
 		}
-		pageSource := getContents(pageURL)
-		rawBytes, _ := io.ReadAll(pageSource)
+		rawBytes := getContents(pageURL)
 		for _, link := range crawlMemberAlbums(bytes.NewReader(rawBytes), modelName) {
 			if !seen[link] {
 				seen[link] = true
@@ -688,8 +682,7 @@ func getAllBlogLinks(modelURL string, modelName string) []string {
 		} else {
 			pageURL = fmt.Sprintf("%s?offset=%d", modelURL, offset)
 		}
-		pageSource := getContents(pageURL)
-		rawBytes, _ := io.ReadAll(pageSource)
+		rawBytes := getContents(pageURL)
 		for _, link := range crawlBlogLinks(bytes.NewReader(rawBytes), modelName) {
 			if !seen[link] {
 				seen[link] = true
@@ -716,8 +709,7 @@ func getAllVideoLinks(modelURL string) []string {
 		} else {
 			pageURL = fmt.Sprintf("%s?offset=%d", modelURL, offset)
 		}
-		pageSource := getContents(pageURL)
-		rawBytes, _ := io.ReadAll(pageSource)
+		rawBytes := getContents(pageURL)
 		for _, link := range crawlVideoLinks(bytes.NewReader(rawBytes)) {
 			if !seen[link] {
 				seen[link] = true
@@ -860,21 +852,49 @@ func newAuthedClient(target string) http.Client {
 			jar.SetCookies(u, cookies)
 		}
 	}
-	return http.Client{Jar: jar}
+	return http.Client{Jar: jar, Timeout: 120 * time.Second}
 }
 
-func getContents(link string) io.Reader {
+// getContents fetches a URL and returns its body as bytes, panicking on any
+// error. The response body is always closed, the HTTP status is checked, and
+// the client has a timeout, so callers no longer leak connections or silently
+// consume error pages. For fallible fetches (e.g. paginated fallbacks), use
+// getContentsE.
+func getContents(link string) []byte {
+	rawBytes, err := getContentsE(link)
+	if err != nil {
+		panic(err)
+	}
+	return rawBytes
+}
+
+// getContentsE is the error-returning variant of getContents. It returns the
+// body bytes and any error (transport error or non-2xx status) so callers can
+// react — for example, the group-thread comment pagination falls back to an
+// alternate URL scheme on failure.
+func getContentsE(link string) ([]byte, error) {
 	client := newAuthedClient(link)
-	req, _ := http.NewRequest("GET", link, nil)
+	req, err := http.NewRequest("GET", link, nil)
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
 	req.Header.Set("Referer", "https://www.suicidegirls.com/")
 	resp, err := client.Do(req)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
-	return resp.Body
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("request to %s failed: %s", link, resp.Status)
+	}
+	rawBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return rawBytes, nil
 }
 
 func getValueFromAttribute(t gohtml.Token, attr string) string {

@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"sync"
@@ -14,11 +13,7 @@ import (
 )
 
 func downloadAlbum(albumURL string, downloadsDir string, finalizeWithZip bool, isCandid bool) {
-	pageSource := getContents(albumURL)
-	rawBytes, err := io.ReadAll(pageSource)
-	if err != nil {
-		panic(err)
-	}
+	rawBytes := getContents(albumURL)
 
 	info := parsePageInfo(getTitle(bytes.NewReader(rawBytes)))
 
@@ -59,6 +54,10 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 	total := len(imagesFound)
 	sem := make(chan struct{}, 5) // limit to 5 simultaneous downloads
 
+	completed := 0
+	var totalBytes int64
+
+	printProgress("Downloading", 0, total, 0)
 	for i, imageURL := range imagesFound {
 		sem <- struct{}{} // acquire slot before spawning
 		if i > 0 {
@@ -71,14 +70,17 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 			
 			imageOutput := filepath.Join(albumDir, fmt.Sprintf("%s - %04d.jpg", albumID, i+1))
 			b, err := saveImage(imageURL, imageOutput)
+			
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				fmt.Printf("[%04d/%04d] — error: %v\n", i+1, total, err)
-				return
+				fmt.Printf("\r%s\rError: [%04d/%04d] — %v\n", strings.Repeat(" ", 85), i+1, total, err)
+			} else {
+				imagesDownloaded[i] = imageOutput
+				totalBytes += b
 			}
-			imagesDownloaded[i] = imageOutput
-			fmt.Printf("[%04d/%04d] — %.2f MB\n", i+1, total, float64(b)/1024/1024)
+			completed++
+			printProgress("Downloading", completed, total, totalBytes)
 		}(i, imageURL)
 	}
 
@@ -106,7 +108,8 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 		}
 	}
 
-	fmt.Println("Done!\n")
+	//fmt.Println("Albums Done.")
+	fmt.Println()
 }
 
 func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloadsDir string) {
@@ -196,14 +199,16 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 	fmt.Printf("Candid post %s/%s (%s) — %d image(s)\n", modelName, postID, postName, len(imagesFound))
 
 	if len(imagesFound) == 1 {
+		printProgress("Downloading", 0, 1, 0)
 		imageOutput := filepath.Join(modelDir, fmt.Sprintf("%s - %s - 0001.jpg", postID, postName))
 		b, err := saveImage(imagesFound[0], imageOutput)
 		if err != nil {
-			fmt.Printf("[0001/0001] — error: %v\n", err)
+			fmt.Printf("\r%s\rError: [0001/0001] — %v\n", strings.Repeat(" ", 85), err)
 			return
 		}
-		fmt.Printf("[0001/0001] — %.2f MB\n", float64(b)/1024/1024)
-		fmt.Println("Done!\n")
+		printProgress("Downloading", 1, 1, b)
+		//fmt.Println("Blog Done.")
+		fmt.Println()
 		return
 	}
 
@@ -216,6 +221,10 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 	total := len(imagesFound)
 	sem := make(chan struct{}, 5) // limit to 5 simultaneous downloads
 
+	completed := 0
+	var totalBytes int64
+
+	printProgress("Downloading", 0, total, 0)
 	for i, imageURL := range imagesFound {
 		sem <- struct{}{} // acquire slot before spawning
 		if i > 0 {
@@ -231,15 +240,18 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				fmt.Printf("[%04d/%04d] — error: %v\n", i+1, total, err)
-				return
+				fmt.Printf("\r%s\rError: [%04d/%04d] — %v\n", strings.Repeat(" ", 85), i+1, total, err)
+			} else {
+				totalBytes += b
 			}
-			fmt.Printf("[%04d/%04d] — %.2f MB\n", i+1, total, float64(b)/1024/1024)
+			completed++
+			printProgress("Downloading", completed, total, totalBytes)
 		}(i, imageURL)
 	}
 
 	wg.Wait()
-	fmt.Println("Done!\n")
+	//fmt.Println("Candids Done.")
+	fmt.Println()
 }
 
 func downloadBlogPost(postURL string, downloadsDir string) {
@@ -247,11 +259,7 @@ func downloadBlogPost(postURL string, downloadsDir string) {
 }
 
 func downloadGroupThread(threadURL string, downloadsDir string) {
-	pageSource := getContents(threadURL)
-	rawBytes, err := io.ReadAll(pageSource)
-	if err != nil {
-		panic(err)
-	}
+	rawBytes := getContents(threadURL)
 
 	parts := strings.Split(strings.TrimSuffix(threadURL, "/"), "/")
 	groupName := "group"
@@ -316,21 +324,25 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 
 		total := len(bucket.Images)
 		if total == 1 {
+			printProgress(baseName, 0, 1, 0)
 			imageOutput := fmt.Sprintf("%s/%s - 0001.jpg", threadDir, baseName)
 			b, err := saveImage(bucket.Images[0], imageOutput)
 			if err != nil {
-				fmt.Printf("%s [0001/0001] — error: %v\n", baseName, err)
+				fmt.Printf("\r%s\rError: %s [0001/0001] — %v\n", strings.Repeat(" ", 85), baseName, err)
 				continue
 			}
-			fmt.Printf("%s [0001/0001] — %.2f MB\n", baseName, float64(b)/1024/1024)
+			printProgress(baseName, 1, 1, b)
 			continue
 		}
 
 		var wg sync.WaitGroup
 		var mu sync.Mutex
+		completed := 0
+		var totalBytes int64
 		
 		sem := make(chan struct{}, 5) // limit to 5 simultaneous downloads
 		
+		printProgress(baseName, 0, total, 0)
 		for i, imageURL := range bucket.Images {
 			sem <- struct{}{} // acquire slot before spawning
 			if i > 0 {
@@ -346,10 +358,12 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 				mu.Lock()
 				defer mu.Unlock()
 				if err != nil {
-					fmt.Printf("%s [%04d/%04d] — error: %v\n", baseName, i+1, total, err)
-					return
+					fmt.Printf("\r%s\rError: %s [%04d/%04d] — %v\n", strings.Repeat(" ", 85), baseName, i+1, total, err)
+				} else {
+					totalBytes += b
 				}
-				fmt.Printf("%s [%04d/%04d] — %.2f MB\n", baseName, i+1, total, float64(b)/1024/1024)
+				completed++
+				printProgress(baseName, completed, total, totalBytes)
 			}(i, imageURL)
 		}
 		wg.Wait()
@@ -445,6 +459,33 @@ func main() {
 			downloadBlogPost(link, downloadsDir)
 		}
 
-		fmt.Println("Done!\n")
+		fmt.Println("Model:", modelName, "Done!")
+	}
+}
+
+func printProgress(prefix string, completed, total int, totalBytes int64) {
+	if total <= 0 {
+		return
+	}
+	width := 30
+	percent := float64(completed) / float64(total)
+	filled := int(percent * float64(width))
+	if filled > width {
+		filled = width
+	}
+
+	var bar string
+	if filled == width {
+		bar = strings.Repeat("=", width)
+	} else if filled > 0 {
+		bar = strings.Repeat("=", filled-1) + ">" + strings.Repeat(" ", width-filled)
+	} else {
+		bar = strings.Repeat(" ", width)
+	}
+
+	sizeMB := float64(totalBytes) / 1024 / 1024
+	fmt.Printf("\r%s: [%s] %d/%d (%d%%) | %.2f MB", prefix, bar, completed, total, int(percent*100), sizeMB)
+	if completed == total {
+		fmt.Println()
 	}
 }

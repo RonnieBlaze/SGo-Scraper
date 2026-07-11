@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,11 +86,7 @@ func parseVideoInfo(videoURL string, rawBytes []byte, expectedModel string) (str
 }
 
 func downloadVideoPost(videoURL string, downloadsDir string, expectedModel string) {
-	pageSource := getContents(videoURL)
-	rawBytes, err := io.ReadAll(pageSource)
-	if err != nil {
-		panic(err)
-	}
+	rawBytes := getContents(videoURL)
 
 	videoID, postTitle, modelName := parseVideoInfo(videoURL, rawBytes, expectedModel)
 	modelDir := filepath.Join(downloadsDir, modelName, "videos")
@@ -123,6 +118,9 @@ func downloadVideoPost(videoURL string, downloadsDir string, expectedModel strin
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		fmt.Printf("Video %s/%s — ffmpeg failed: %v\n", modelName, videoID, err)
+		// Remove any partial output so the skip-on-rerun check (prefix match
+		// on videoID) doesn't treat a failed download as "already on disk".
+		os.Remove(output)
 		return
 	}
 
@@ -138,5 +136,6 @@ func downloadVideoPost(videoURL string, downloadsDir string, expectedModel strin
 		return
 	}
 
-	fmt.Println("Done!\n")
+	//fmt.Println("Videos Done.")
+	fmt.Println()
 }
