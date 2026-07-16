@@ -39,6 +39,15 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 		}
 	}
 
+	db, dbErr := getModelDB(info.ModelName)
+	if dbErr == nil {
+		defer db.Close()
+		if isDownloaded(db, "album", albumID) {
+			fmt.Printf("[skip] Album %s/%s — already in database\n", info.ModelName, albumID)
+			return
+		}
+	}
+
 	imagesFound := crawlAlbumImages(bytes.NewReader(rawBytes))
 	albumDate, dateErr := getAlbumDate(bytes.NewReader(rawBytes))
 
@@ -85,6 +94,20 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 	}
 
 	wg.Wait()
+
+	anySuccess := false
+	for _, f := range imagesDownloaded {
+		if f != "" {
+			anySuccess = true
+			break
+		}
+	}
+	if anySuccess {
+		if db, err := getModelDB(info.ModelName); err == nil {
+			defer db.Close()
+			markDownloaded(db, "album", albumID, info.AlbumName)
+		}
+	}
 
 	if dateErr == nil {
 		for _, imgPath := range imagesDownloaded {
@@ -182,6 +205,15 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 		return
 	}
 
+	db, dbErr := getModelDB(modelName)
+	if dbErr == nil {
+		if isDownloaded(db, "candid", postID) {
+			db.Close()
+			fmt.Printf("[skip] Candid post %s/%s — already in database\n", modelName, postID)
+			return
+		}
+	}
+
 	modelDir := filepath.Join(downloadsDir, modelName, "candids")
 
 	// Skip if already downloaded.
@@ -189,9 +221,16 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 		for _, e := range entries {
 			if strings.HasPrefix(e.Name(), postID) {
 				fmt.Printf("[skip] Candid post %s/%s — already on disk\n", modelName, postID)
+				if dbErr == nil {
+					markDownloaded(db, "candid", postID, postName)
+					db.Close()
+				}
 				return
 			}
 		}
+	}
+	if dbErr == nil {
+		db.Close()
 	}
 	fmt.Println("ModelDir:", modelDir) //debug info for looking directory name.
 	checkAndCreateDir(modelDir)
@@ -207,8 +246,11 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 			return
 		}
 		printProgress("Downloading", 1, 1, b)
-		//fmt.Println("Blog Done.")
-		fmt.Println()
+		if db, err := getModelDB(modelName); err == nil {
+			defer db.Close()
+			markDownloaded(db, "candid", postID, postName)
+		}
+		fmt.Println("Done!")
 		return
 	}
 
@@ -250,7 +292,11 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 	}
 
 	wg.Wait()
-	//fmt.Println("Candids Done.")
+	if db, err := getModelDB(modelName); err == nil {
+		defer db.Close()
+		markDownloaded(db, "candid", postID, postName)
+	}
+	fmt.Println("Done!")
 	fmt.Println()
 }
 
@@ -299,7 +345,18 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 			continue
 		}
 
+		commentSnippet := truncateName(sanitizeName(bucket.CommentText), 60)
+
 		if bucket.CommentID != "" {
+			db, dbErr := getGroupDB()
+			if dbErr == nil {
+				if isDownloaded(db, "group_comment", bucket.CommentID) {
+					db.Close()
+					fmt.Printf("[skip] Group thread %s/%s — comment %s already in database\n", groupName, threadID, bucket.CommentID)
+					continue
+				}
+			}
+
 			prefix := bucket.CommentID + " - "
 			alreadyOnDisk := false
 			for _, e := range existingEntries {
@@ -310,11 +367,17 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 			}
 			if alreadyOnDisk {
 				fmt.Printf("[skip] Group thread %s/%s — comment %s already on disk\n", groupName, threadID, bucket.CommentID)
+				if dbErr == nil {
+					markDownloaded(db, "group_comment", bucket.CommentID, commentSnippet)
+					db.Close()
+				}
 				continue
+			}
+			if dbErr == nil {
+				db.Close()
 			}
 		}
 
-		commentSnippet := truncateName(sanitizeName(bucket.CommentText), 60)
 		var baseName string
 		if commentSnippet != "" {
 			baseName = fmt.Sprintf("%s - %s - %s", bucket.CommentID, bucket.Username, commentSnippet)
@@ -332,6 +395,12 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 				continue
 			}
 			printProgress(baseName, 1, 1, b)
+			if bucket.CommentID != "" {
+				if db, err := getGroupDB(); err == nil {
+					defer db.Close()
+					markDownloaded(db, "group_comment", bucket.CommentID, commentSnippet)
+				}
+			}
 			continue
 		}
 
@@ -367,6 +436,12 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 			}(i, imageURL)
 		}
 		wg.Wait()
+		if bucket.CommentID != "" {
+			if db, err := getGroupDB(); err == nil {
+				defer db.Close()
+				markDownloaded(db, "group_comment", bucket.CommentID, commentSnippet)
+			}
+		}
 	}
 }
 

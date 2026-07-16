@@ -2,12 +2,15 @@ package main
 
 import (
 	"archive/zip"
+	"database/sql"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+
+	_ "modernc.org/sqlite"
 )
 
 func checkAndCreateDir(path string) {
@@ -113,4 +116,88 @@ func ZipFiles(filename string, files []string) error {
 	}
 
 	return nil
+}
+
+func getDBDir() string {
+	exePath, err := os.Executable()
+	var baseDir string
+	if err == nil {
+		baseDir = filepath.Dir(exePath)
+	} else {
+		baseDir = "." // Fallback to current working directory
+	}
+	dbDir := filepath.Join(baseDir, "modelsdb")
+	checkAndCreateDir(dbDir)
+	return dbDir
+}
+
+func getModelDB(modelName string) (*sql.DB, error) {
+	dbDir := getDBDir()
+	safeModel := sanitizeName(modelName)
+	dbPath := filepath.Join(dbDir, safeModel+".db")
+	
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, err
+	}
+	
+	schema := `
+	CREATE TABLE IF NOT EXISTS downloads (
+		type TEXT,
+		item_id TEXT,
+		title TEXT,
+		downloaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (type, item_id)
+	);`
+	_, err = db.Exec(schema)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func getGroupDB() (*sql.DB, error) {
+	dbDir := getDBDir()
+	dbPath := filepath.Join(dbDir, "groups.db")
+	
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, err
+	}
+	
+	schema := `
+	CREATE TABLE IF NOT EXISTS downloads (
+		type TEXT,
+		item_id TEXT,
+		title TEXT,
+		downloaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (type, item_id)
+	);`
+	_, err = db.Exec(schema)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func isDownloaded(db *sql.DB, itemType string, itemID string) bool {
+	if db == nil {
+		return false
+	}
+	var exists bool
+	err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM downloads WHERE type = ? AND item_id = ?)", itemType, itemID).Scan(&exists)
+	if err != nil {
+		return false
+	}
+	return exists
+}
+
+func markDownloaded(db *sql.DB, itemType string, itemID string, title string) error {
+	if db == nil {
+		return nil
+	}
+	_, err := db.Exec("INSERT OR REPLACE INTO downloads (type, item_id, title) VALUES (?, ?, ?)", itemType, itemID, title)
+	return err
 }

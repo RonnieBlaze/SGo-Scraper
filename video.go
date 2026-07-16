@@ -89,6 +89,16 @@ func downloadVideoPost(videoURL string, downloadsDir string, expectedModel strin
 	rawBytes := getContents(videoURL)
 
 	videoID, postTitle, modelName := parseVideoInfo(videoURL, rawBytes, expectedModel)
+
+	db, dbErr := getModelDB(modelName)
+	if dbErr == nil {
+		if isDownloaded(db, "video", videoID) {
+			db.Close()
+			fmt.Printf("[skip] Video %s/%s — already in database\n", modelName, videoID)
+			return
+		}
+	}
+
 	modelDir := filepath.Join(downloadsDir, modelName, "videos")
 
 	// Skip if already downloaded.
@@ -96,9 +106,16 @@ func downloadVideoPost(videoURL string, downloadsDir string, expectedModel strin
 		for _, e := range entries {
 			if strings.HasPrefix(e.Name(), videoID) {
 				fmt.Printf("[skip] Video %s/%s — already on disk\n", modelName, videoID)
+				if dbErr == nil {
+					markDownloaded(db, "video", videoID, postTitle)
+					db.Close()
+				}
 				return
 			}
 		}
+	}
+	if dbErr == nil {
+		db.Close()
 	}
 
 	streamURL := crawlVideoStream(bytes.NewReader(rawBytes))
@@ -136,6 +153,10 @@ func downloadVideoPost(videoURL string, downloadsDir string, expectedModel strin
 		return
 	}
 
-	//fmt.Println("Videos Done.")
-	fmt.Println()
+	if db, err := getModelDB(modelName); err == nil {
+		defer db.Close()
+		markDownloaded(db, "video", videoID, postTitle)
+	}
+
+	fmt.Println("Done!")
 }
