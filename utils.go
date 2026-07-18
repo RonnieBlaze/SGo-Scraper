@@ -2,144 +2,21 @@ package main
 
 import (
 	"archive/zip"
+	"database/sql"
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 func checkAndCreateDir(path string) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		os.MkdirAll(path, os.ModePerm)
 	}
-}
-
-// newCandidClient returns an http.Client that:
-//   - carries the session cookies (so /temp/ signed URLs are authorised)
-//   - re-injects all request headers on every redirect hop (so Referer and
-//     the browser fingerprint survive the /temp/ → /cache/ 302 bounce)
-func newCandidClient(referer string) *http.Client {
-	if referer == "" {
-		referer = "https://www.suicidegirls.com/"
-	}
-
-	headers := map[string]string{
-		"User-Agent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:150.0) Gecko/20100101 Firefox/150.0",
-		"Accept":          "image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5",
-		"Accept-Language": "en-US,en;q=0.9",
-		"Referer":         referer,
-		"Sec-Fetch-Dest":  "image",
-		"Sec-Fetch-Mode":  "no-cors",
-		"Sec-Fetch-Site":  "cross-site",
-		"Priority":        "u=4, i",
-		"Pragma":          "no-cache",
-		"Cache-Control":   "no-cache",
-	}
-
-	jar, _ := cookiejar.New(nil)
-	cookieData := []struct{ name, value string }{
-		{"sessid", os.Getenv("SESSIONIDTOKEN")},
-		{"sgcsrftoken", os.Getenv("SGCSRFTOKEN")},
-		{"rscivid", os.Getenv("RSCIVID")},
-	}
-
-	var cookies []*http.Cookie
-	for _, c := range cookieData {
-		if c.value == "" {
-			continue
-		}
-		cookies = append(cookies, &http.Cookie{
-			Name:   c.name,
-			Value:  c.value,
-			Path:   "/",
-			Domain: ".suicidegirls.com",
-		})
-	}
-
-	for _, base := range []string{"https://www.suicidegirls.com", "https://suicidegirls.com"} {
-		if u, err := url.Parse(base); err == nil {
-			jar.SetCookies(u, cookies)
-		}
-	}
-
-	return &http.Client{
-		Timeout: 120 * time.Second,
-		Jar:     jar,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) > 10 {
-				return fmt.Errorf("too many redirects")
-			}
-			for k, v := range headers {
-				req.Header.Set(k, v)
-			}
-			return nil
-		},
-	}
-}
-
-// saveImageWithReferer downloads a candid image.
-// Uses session cookies (for /temp/ auth) and preserves headers across
-// the /temp/ → /cache/ redirect so CloudFront accepts the final request.
-func saveImageWithReferer(imageURL string, output string, referer string) (int64, error) {
-	client := newCandidClient(referer)
-
-	req, err := http.NewRequest("GET", imageURL, nil)
-	if err != nil {
-		return 0, err
-	}
-
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:150.0) Gecko/20100101 Firefox/150.0")
-	req.Header.Set("Accept", "image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	if referer == "" {
-		referer = "https://www.suicidegirls.com/"
-	}
-	req.Header.Set("Referer", referer)
-	req.Header.Set("Sec-Fetch-Dest", "image")
-	req.Header.Set("Sec-Fetch-Mode", "no-cors")
-	req.Header.Set("Sec-Fetch-Site", "cross-site")
-	req.Header.Set("Priority", "u=4, i")
-	req.Header.Set("Pragma", "no-cache")
-	req.Header.Set("Cache-Control", "no-cache")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		fmt.Printf(" [HTTP %d] %s\n", resp.StatusCode, imageURL)
-		return 0, fmt.Errorf("image request failed: %s", resp.Status)
-	}
-
-	if ct := resp.Header.Get("Content-Type"); strings.Contains(strings.ToLower(ct), "text/html") {
-		return 0, fmt.Errorf("image URL returned HTML (likely ad redirect): %s", ct)
-	}
-
-	img, err := os.Create(output)
-	if err != nil {
-		return 0, err
-	}
-	defer img.Close()
-
-	n, err := io.Copy(img, resp.Body)
-	if err != nil {
-		return n, err
-	}
-
-	if lastMod := resp.Header.Get("Last-Modified"); lastMod != "" {
-		if t, err := http.ParseTime(lastMod); err == nil {
-			os.Chtimes(output, t, t)
-		}
-	}
-
-	return n, nil
 }
 
 // saveImage is used for proper album sets, blog images, and group threads.
@@ -239,4 +116,88 @@ func ZipFiles(filename string, files []string) error {
 	}
 
 	return nil
+}
+
+func getDBDir() string {
+	exePath, err := os.Executable()
+	var baseDir string
+	if err == nil {
+		baseDir = filepath.Dir(exePath)
+	} else {
+		baseDir = "." // Fallback to current working directory
+	}
+	dbDir := filepath.Join(baseDir, "modelsdb")
+	checkAndCreateDir(dbDir)
+	return dbDir
+}
+
+func getModelDB(modelName string) (*sql.DB, error) {
+	dbDir := getDBDir()
+	safeModel := sanitizeName(modelName)
+	dbPath := filepath.Join(dbDir, safeModel+".db")
+	
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, err
+	}
+	
+	schema := `
+	CREATE TABLE IF NOT EXISTS downloads (
+		type TEXT,
+		item_id TEXT,
+		title TEXT,
+		downloaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (type, item_id)
+	);`
+	_, err = db.Exec(schema)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func getGroupDB() (*sql.DB, error) {
+	dbDir := getDBDir()
+	dbPath := filepath.Join(dbDir, "groups.db")
+	
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, err
+	}
+	
+	schema := `
+	CREATE TABLE IF NOT EXISTS downloads (
+		type TEXT,
+		item_id TEXT,
+		title TEXT,
+		downloaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (type, item_id)
+	);`
+	_, err = db.Exec(schema)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func isDownloaded(db *sql.DB, itemType string, itemID string) bool {
+	if db == nil {
+		return false
+	}
+	var exists bool
+	err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM downloads WHERE type = ? AND item_id = ?)", itemType, itemID).Scan(&exists)
+	if err != nil {
+		return false
+	}
+	return exists
+}
+
+func markDownloaded(db *sql.DB, itemType string, itemID string, title string) error {
+	if db == nil {
+		return nil
+	}
+	_, err := db.Exec("INSERT OR REPLACE INTO downloads (type, item_id, title) VALUES (?, ?, ?)", itemType, itemID, title)
+	return err
 }

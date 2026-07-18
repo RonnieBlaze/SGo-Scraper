@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"sync"
@@ -14,11 +13,7 @@ import (
 )
 
 func downloadAlbum(albumURL string, downloadsDir string, finalizeWithZip bool, isCandid bool) {
-	pageSource := getContents(albumURL)
-	rawBytes, err := io.ReadAll(pageSource)
-	if err != nil {
-		panic(err)
-	}
+	rawBytes := getContents(albumURL)
 
 	info := parsePageInfo(getTitle(bytes.NewReader(rawBytes)))
 
@@ -44,6 +39,15 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 		}
 	}
 
+	db, dbErr := getModelDB(info.ModelName)
+	if dbErr == nil {
+		defer db.Close()
+		if isDownloaded(db, "album", albumID) {
+			fmt.Printf("[skip] Album %s/%s — already in database\n", info.ModelName, albumID)
+			return
+		}
+	}
+
 	imagesFound := crawlAlbumImages(bytes.NewReader(rawBytes))
 	albumDate, dateErr := getAlbumDate(bytes.NewReader(rawBytes))
 
@@ -59,6 +63,10 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 	total := len(imagesFound)
 	sem := make(chan struct{}, 5) // limit to 5 simultaneous downloads
 
+	completed := 0
+	var totalBytes int64
+
+	printProgress("Downloading", 0, total, 0)
 	for i, imageURL := range imagesFound {
 		sem <- struct{}{} // acquire slot before spawning
 		if i > 0 {
@@ -71,18 +79,35 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 			
 			imageOutput := filepath.Join(albumDir, fmt.Sprintf("%s - %04d.jpg", albumID, i+1))
 			b, err := saveImage(imageURL, imageOutput)
+			
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				fmt.Printf("[%04d/%04d] — error: %v\n", i+1, total, err)
-				return
+				fmt.Printf("\r%s\rError: [%04d/%04d] — %v\n", strings.Repeat(" ", 85), i+1, total, err)
+			} else {
+				imagesDownloaded[i] = imageOutput
+				totalBytes += b
 			}
-			imagesDownloaded[i] = imageOutput
-			fmt.Printf("[%04d/%04d] — %.2f MB\n", i+1, total, float64(b)/1024/1024)
+			completed++
+			printProgress("Downloading", completed, total, totalBytes)
 		}(i, imageURL)
 	}
 
 	wg.Wait()
+
+	anySuccess := false
+	for _, f := range imagesDownloaded {
+		if f != "" {
+			anySuccess = true
+			break
+		}
+	}
+	if anySuccess {
+		if db, err := getModelDB(info.ModelName); err == nil {
+			defer db.Close()
+			markDownloaded(db, "album", albumID, info.AlbumName)
+		}
+	}
 
 	if dateErr == nil {
 		for _, imgPath := range imagesDownloaded {
@@ -106,7 +131,8 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 		}
 	}
 
-	fmt.Println("Done!\n")
+	//fmt.Println("Albums Done.")
+	fmt.Println()
 }
 
 func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloadsDir string) {
@@ -179,6 +205,15 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 		return
 	}
 
+	db, dbErr := getModelDB(modelName)
+	if dbErr == nil {
+		if isDownloaded(db, "candid", postID) {
+			db.Close()
+			fmt.Printf("[skip] Candid post %s/%s — already in database\n", modelName, postID)
+			return
+		}
+	}
+
 	modelDir := filepath.Join(downloadsDir, modelName, "candids")
 
 	// Skip if already downloaded.
@@ -186,9 +221,16 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 		for _, e := range entries {
 			if strings.HasPrefix(e.Name(), postID) {
 				fmt.Printf("[skip] Candid post %s/%s — already on disk\n", modelName, postID)
+				if dbErr == nil {
+					markDownloaded(db, "candid", postID, postName)
+					db.Close()
+				}
 				return
 			}
 		}
+	}
+	if dbErr == nil {
+		db.Close()
 	}
 	fmt.Println("ModelDir:", modelDir) //debug info for looking directory name.
 	checkAndCreateDir(modelDir)
@@ -196,14 +238,20 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 	fmt.Printf("Candid post %s/%s (%s) — %d image(s)\n", modelName, postID, postName, len(imagesFound))
 
 	if len(imagesFound) == 1 {
+		printProgress("Downloading", 0, 1, 0)
 		imageOutput := filepath.Join(modelDir, fmt.Sprintf("%s - %s - 0001.jpg", postID, postName))
 		b, err := saveImage(imagesFound[0], imageOutput)
 		if err != nil {
-			fmt.Printf("[0001/0001] — error: %v\n", err)
+			fmt.Printf("\r%s\rError: [0001/0001] — %v\n", strings.Repeat(" ", 85), err)
 			return
 		}
-		fmt.Printf("[0001/0001] — %.2f MB\n", float64(b)/1024/1024)
-		fmt.Println("Done!\n")
+		printProgress("Downloading", 1, 1, b)
+		if db, err := getModelDB(modelName); err == nil {
+			defer db.Close()
+			markDownloaded(db, "candid", postID, postName)
+		}
+		//fmt.Println("Done!")
+		fmt.Println()
 		return
 	}
 
@@ -216,6 +264,10 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 	total := len(imagesFound)
 	sem := make(chan struct{}, 5) // limit to 5 simultaneous downloads
 
+	completed := 0
+	var totalBytes int64
+
+	printProgress("Downloading", 0, total, 0)
 	for i, imageURL := range imagesFound {
 		sem <- struct{}{} // acquire slot before spawning
 		if i > 0 {
@@ -231,15 +283,22 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				fmt.Printf("[%04d/%04d] — error: %v\n", i+1, total, err)
-				return
+				fmt.Printf("\r%s\rError: [%04d/%04d] — %v\n", strings.Repeat(" ", 85), i+1, total, err)
+			} else {
+				totalBytes += b
 			}
-			fmt.Printf("[%04d/%04d] — %.2f MB\n", i+1, total, float64(b)/1024/1024)
+			completed++
+			printProgress("Downloading", completed, total, totalBytes)
 		}(i, imageURL)
 	}
 
 	wg.Wait()
-	fmt.Println("Done!\n")
+	if db, err := getModelDB(modelName); err == nil {
+		defer db.Close()
+		markDownloaded(db, "candid", postID, postName)
+	}
+	//fmt.Println("Done!")
+	fmt.Println()
 }
 
 func downloadBlogPost(postURL string, downloadsDir string) {
@@ -247,11 +306,7 @@ func downloadBlogPost(postURL string, downloadsDir string) {
 }
 
 func downloadGroupThread(threadURL string, downloadsDir string) {
-	pageSource := getContents(threadURL)
-	rawBytes, err := io.ReadAll(pageSource)
-	if err != nil {
-		panic(err)
-	}
+	rawBytes := getContents(threadURL)
 
 	parts := strings.Split(strings.TrimSuffix(threadURL, "/"), "/")
 	groupName := "group"
@@ -291,7 +346,18 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 			continue
 		}
 
+		commentSnippet := truncateName(sanitizeName(bucket.CommentText), 60)
+
 		if bucket.CommentID != "" {
+			db, dbErr := getGroupDB()
+			if dbErr == nil {
+				if isDownloaded(db, "group_comment", bucket.CommentID) {
+					db.Close()
+					fmt.Printf("[skip] Group thread %s/%s — comment %s already in database\n", groupName, threadID, bucket.CommentID)
+					continue
+				}
+			}
+
 			prefix := bucket.CommentID + " - "
 			alreadyOnDisk := false
 			for _, e := range existingEntries {
@@ -302,11 +368,17 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 			}
 			if alreadyOnDisk {
 				fmt.Printf("[skip] Group thread %s/%s — comment %s already on disk\n", groupName, threadID, bucket.CommentID)
+				if dbErr == nil {
+					markDownloaded(db, "group_comment", bucket.CommentID, commentSnippet)
+					db.Close()
+				}
 				continue
+			}
+			if dbErr == nil {
+				db.Close()
 			}
 		}
 
-		commentSnippet := truncateName(sanitizeName(bucket.CommentText), 60)
 		var baseName string
 		if commentSnippet != "" {
 			baseName = fmt.Sprintf("%s - %s - %s", bucket.CommentID, bucket.Username, commentSnippet)
@@ -316,21 +388,31 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 
 		total := len(bucket.Images)
 		if total == 1 {
+			printProgress(baseName, 0, 1, 0)
 			imageOutput := fmt.Sprintf("%s/%s - 0001.jpg", threadDir, baseName)
 			b, err := saveImage(bucket.Images[0], imageOutput)
 			if err != nil {
-				fmt.Printf("%s [0001/0001] — error: %v\n", baseName, err)
+				fmt.Printf("\r%s\rError: %s [0001/0001] — %v\n", strings.Repeat(" ", 85), baseName, err)
 				continue
 			}
-			fmt.Printf("%s [0001/0001] — %.2f MB\n", baseName, float64(b)/1024/1024)
+			printProgress(baseName, 1, 1, b)
+			if bucket.CommentID != "" {
+				if db, err := getGroupDB(); err == nil {
+					defer db.Close()
+					markDownloaded(db, "group_comment", bucket.CommentID, commentSnippet)
+				}
+			}
 			continue
 		}
 
 		var wg sync.WaitGroup
 		var mu sync.Mutex
+		completed := 0
+		var totalBytes int64
 		
 		sem := make(chan struct{}, 5) // limit to 5 simultaneous downloads
 		
+		printProgress(baseName, 0, total, 0)
 		for i, imageURL := range bucket.Images {
 			sem <- struct{}{} // acquire slot before spawning
 			if i > 0 {
@@ -346,13 +428,21 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 				mu.Lock()
 				defer mu.Unlock()
 				if err != nil {
-					fmt.Printf("%s [%04d/%04d] — error: %v\n", baseName, i+1, total, err)
-					return
+					fmt.Printf("\r%s\rError: %s [%04d/%04d] — %v\n", strings.Repeat(" ", 85), baseName, i+1, total, err)
+				} else {
+					totalBytes += b
 				}
-				fmt.Printf("%s [%04d/%04d] — %.2f MB\n", baseName, i+1, total, float64(b)/1024/1024)
+				completed++
+				printProgress(baseName, completed, total, totalBytes)
 			}(i, imageURL)
 		}
 		wg.Wait()
+		if bucket.CommentID != "" {
+			if db, err := getGroupDB(); err == nil {
+				defer db.Close()
+				markDownloaded(db, "group_comment", bucket.CommentID, commentSnippet)
+			}
+		}
 	}
 }
 
@@ -445,6 +535,33 @@ func main() {
 			downloadBlogPost(link, downloadsDir)
 		}
 
-		fmt.Println("Done!\n")
+		fmt.Println("Model:", modelName, "Done!")
+	}
+}
+
+func printProgress(prefix string, completed, total int, totalBytes int64) {
+	if total <= 0 {
+		return
+	}
+	width := 30
+	percent := float64(completed) / float64(total)
+	filled := int(percent * float64(width))
+	if filled > width {
+		filled = width
+	}
+
+	var bar string
+	if filled == width {
+		bar = strings.Repeat("=", width)
+	} else if filled > 0 {
+		bar = strings.Repeat("=", filled-1) + ">" + strings.Repeat(" ", width-filled)
+	} else {
+		bar = strings.Repeat(" ", width)
+	}
+
+	sizeMB := float64(totalBytes) / 1024 / 1024
+	fmt.Printf("\r%s: [%s] %d/%d (%d%%) | %.2f MB", prefix, bar, completed, total, int(percent*100), sizeMB)
+	if completed == total {
+		fmt.Println()
 	}
 }

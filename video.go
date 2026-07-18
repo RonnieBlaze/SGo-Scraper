@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,13 +86,19 @@ func parseVideoInfo(videoURL string, rawBytes []byte, expectedModel string) (str
 }
 
 func downloadVideoPost(videoURL string, downloadsDir string, expectedModel string) {
-	pageSource := getContents(videoURL)
-	rawBytes, err := io.ReadAll(pageSource)
-	if err != nil {
-		panic(err)
-	}
+	rawBytes := getContents(videoURL)
 
 	videoID, postTitle, modelName := parseVideoInfo(videoURL, rawBytes, expectedModel)
+
+	db, dbErr := getModelDB(modelName)
+	if dbErr == nil {
+		if isDownloaded(db, "video", videoID) {
+			db.Close()
+			fmt.Printf("[skip] Video %s/%s — already in database\n", modelName, videoID)
+			return
+		}
+	}
+
 	modelDir := filepath.Join(downloadsDir, modelName, "videos")
 
 	// Skip if already downloaded.
@@ -101,9 +106,16 @@ func downloadVideoPost(videoURL string, downloadsDir string, expectedModel strin
 		for _, e := range entries {
 			if strings.HasPrefix(e.Name(), videoID) {
 				fmt.Printf("[skip] Video %s/%s — already on disk\n", modelName, videoID)
+				if dbErr == nil {
+					markDownloaded(db, "video", videoID, postTitle)
+					db.Close()
+				}
 				return
 			}
 		}
+	}
+	if dbErr == nil {
+		db.Close()
 	}
 
 	streamURL := crawlVideoStream(bytes.NewReader(rawBytes))
@@ -123,6 +135,9 @@ func downloadVideoPost(videoURL string, downloadsDir string, expectedModel strin
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		fmt.Printf("Video %s/%s — ffmpeg failed: %v\n", modelName, videoID, err)
+		// Remove any partial output so the skip-on-rerun check (prefix match
+		// on videoID) doesn't treat a failed download as "already on disk".
+		os.Remove(output)
 		return
 	}
 
@@ -138,5 +153,11 @@ func downloadVideoPost(videoURL string, downloadsDir string, expectedModel strin
 		return
 	}
 
-	fmt.Println("Done!\n")
+	if db, err := getModelDB(modelName); err == nil {
+		defer db.Close()
+		markDownloaded(db, "video", videoID, postTitle)
+	}
+
+	//fmt.Println("Done!")
+	fmt.Println()
 }
