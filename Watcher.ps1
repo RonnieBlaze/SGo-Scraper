@@ -24,15 +24,22 @@ while ($true) {
                    Select-Object -First 1
 
             if ($Url) {
-                Start-Process `
-                    -FilePath (Join-Path $ScraperDir "SGo-Scraper-master.exe") `
-                    -ArgumentList $Url `
-                    -WorkingDirectory $ScraperDir `
-                    -Wait `
-                    -NoNewWindow
+                & (Join-Path $ScraperDir "SGo-Scraper-master.exe") $Url
+                
+                if ($LASTEXITCODE -eq 0) {
+                    Remove-Item $File -Force
+                } else {
+                    Write-Warning "Scraper failed with exit code $LASTEXITCODE for $File. Keeping URL in queue."
+                    if ($LASTEXITCODE -eq 429) {
+                        Write-Warning "Rate limit (429) hit. Pausing watcher for 5 minutes before retrying..."
+                        Start-Sleep -Seconds 300
+                    } else {
+                        Write-Warning "Pausing watcher for 30 seconds before retrying..."
+                        Start-Sleep -Seconds 30
+                    }
+                    break
+                }
             }
-
-            Remove-Item $File -Force
 
         }
         catch {
