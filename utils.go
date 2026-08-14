@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	_ "modernc.org/sqlite"
@@ -37,6 +38,11 @@ func saveImage(imageURL string, output string) (int64, error) {
 		return 0, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == 429 {
+		fmt.Printf("\n[429] Too Many Requests on image download: %s. Exiting scraper...\n", imageURL)
+		os.Exit(429)
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return 0, fmt.Errorf("image request failed: %s", resp.Status)
@@ -200,4 +206,15 @@ func markDownloaded(db *sql.DB, itemType string, itemID string, title string) er
 	}
 	_, err := db.Exec("INSERT OR REPLACE INTO downloads (type, item_id, title) VALUES (?, ?, ?)", itemType, itemID, title)
 	return err
+}
+
+func formatIndex(curr, total int) string {
+	if total <= 0 {
+		return ""
+	}
+	width := len(strconv.Itoa(total))
+	if width < 2 {
+		width = 2
+	}
+	return fmt.Sprintf("[%0*d/%0*d] ", width, curr, width, total)
 }
