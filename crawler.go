@@ -20,7 +20,7 @@ import (
 
 var albumLinkPattern = regexp.MustCompile(`/((?:girls|members))/([^/]+)/album/(\d+)(?:/[^"'#?]+)?/?`)
 var memberAlbumLinkPattern = regexp.MustCompile(`/members/([^/]+)/album/(\d+)(?:/[^"'#?]+)?/?`)
-var blogLinkPattern = regexp.MustCompile(`/members/([^/]+)/blog/(\d+)(?:/[^"'#?]+)?/?`)
+var blogLinkPattern = regexp.MustCompile(`/(?:members|girls)/([^/]+)/blog/(\d+)(?:/[^"'#?]+)?/?`)
 var videoLinkPattern = regexp.MustCompile(`/videos/(\d+)(?:/[^"'#?]+)?/?`)
 
 // ── group thread ────────────────────────────────────────────────────────────
@@ -495,7 +495,7 @@ func crawlAlbums(rawContents io.Reader, modelName string) []string {
 			continue
 		}
 		m := albumLinkPattern.FindStringSubmatch(link)
-		if m == nil || (modelName != "" && m[2] != modelName) {
+		if m == nil || (modelName != "" && !strings.EqualFold(m[2], modelName)) {
 			continue
 		}
 		if !strings.HasPrefix(link, "http") {
@@ -531,7 +531,7 @@ func crawlMemberAlbums(rawContents io.Reader, modelName string) []string {
 			continue
 		}
 		m := memberAlbumLinkPattern.FindStringSubmatch(link)
-		if m == nil || (modelName != "" && m[1] != modelName) {
+		if m == nil || (modelName != "" && !strings.EqualFold(m[1], modelName)) {
 			continue
 		}
 		if !strings.HasPrefix(link, "http") {
@@ -567,7 +567,7 @@ func crawlBlogLinks(rawContents io.Reader, modelName string) []string {
 			continue
 		}
 		m := blogLinkPattern.FindStringSubmatch(link)
-		if m == nil || (modelName != "" && m[1] != modelName) {
+		if m == nil || (modelName != "" && !strings.EqualFold(m[1], modelName)) {
 			continue
 		}
 		if !strings.HasPrefix(link, "http") {
@@ -887,6 +887,10 @@ func getContentsE(link string) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == 429 {
+		fmt.Printf("\n[429] Too Many Requests on page fetch: %s. Exiting scraper...\n", link)
+		os.Exit(429)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("request to %s failed: %s", link, resp.Status)
 	}
