@@ -20,7 +20,7 @@ import (
 
 var albumLinkPattern = regexp.MustCompile(`/((?:girls|members))/([^/]+)/album/(\d+)(?:/[^"'#?]+)?/?`)
 var memberAlbumLinkPattern = regexp.MustCompile(`/members/([^/]+)/album/(\d+)(?:/[^"'#?]+)?/?`)
-var blogLinkPattern = regexp.MustCompile(`/members/([^/]+)/blog/(\d+)(?:/[^"'#?]+)?/?`)
+var blogLinkPattern = regexp.MustCompile(`/(?:members|girls)/([^/]+)/blog/(\d+)(?:/[^"'#?]+)?/?`)
 var videoLinkPattern = regexp.MustCompile(`/videos/(\d+)(?:/[^"'#?]+)?/?`)
 
 // ── group thread ────────────────────────────────────────────────────────────
@@ -345,7 +345,7 @@ func getAlbumInfoImages(postID string) []string {
 	if err != nil {
 		return nil
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:150.0) Gecko/20100101 Firefox/150.0")
+	req.Header.Set("User-Agent", getUserAgent())
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	req.Header.Set("Referer", "https://www.suicidegirls.com/")
@@ -495,7 +495,7 @@ func crawlAlbums(rawContents io.Reader, modelName string) []string {
 			continue
 		}
 		m := albumLinkPattern.FindStringSubmatch(link)
-		if m == nil || (modelName != "" && m[2] != modelName) {
+		if m == nil || (modelName != "" && !strings.EqualFold(m[2], modelName)) {
 			continue
 		}
 		if !strings.HasPrefix(link, "http") {
@@ -531,7 +531,7 @@ func crawlMemberAlbums(rawContents io.Reader, modelName string) []string {
 			continue
 		}
 		m := memberAlbumLinkPattern.FindStringSubmatch(link)
-		if m == nil || (modelName != "" && m[1] != modelName) {
+		if m == nil || (modelName != "" && !strings.EqualFold(m[1], modelName)) {
 			continue
 		}
 		if !strings.HasPrefix(link, "http") {
@@ -567,7 +567,7 @@ func crawlBlogLinks(rawContents io.Reader, modelName string) []string {
 			continue
 		}
 		m := blogLinkPattern.FindStringSubmatch(link)
-		if m == nil || (modelName != "" && m[1] != modelName) {
+		if m == nil || (modelName != "" && !strings.EqualFold(m[1], modelName)) {
 			continue
 		}
 		if !strings.HasPrefix(link, "http") {
@@ -878,7 +878,7 @@ func getContentsE(link string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", getUserAgent())
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
 	req.Header.Set("Referer", "https://www.suicidegirls.com/")
@@ -887,6 +887,10 @@ func getContentsE(link string) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == 429 {
+		fmt.Printf("\n[429] Too Many Requests on page fetch: %s. Exiting scraper...\n", link)
+		os.Exit(429)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("request to %s failed: %s", link, resp.Status)
 	}
