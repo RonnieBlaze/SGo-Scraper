@@ -10,9 +10,33 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+var defaultDownloadDelay = 2000 * time.Millisecond
+var defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+
+func getDownloadDelay() time.Duration {
+	val := os.Getenv("DOWNLOAD_DELAY_MS")
+	if val == "" {
+		return defaultDownloadDelay
+	}
+	ms, err := strconv.Atoi(strings.TrimSpace(val))
+	if err != nil || ms < 0 {
+		return defaultDownloadDelay
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+func getUserAgent() string {
+	ua := strings.TrimSpace(os.Getenv("USER_AGENT"))
+	if ua != "" {
+		return ua
+	}
+	return defaultUserAgent
+}
 
 func checkAndCreateDir(path string) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -28,7 +52,7 @@ func saveImage(imageURL string, output string) (int64, error) {
 		return 0, err
 	}
 
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", getUserAgent())
 	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
 	req.Header.Set("Referer", "https://www.suicidegirls.com/")
@@ -38,6 +62,11 @@ func saveImage(imageURL string, output string) (int64, error) {
 		return 0, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == 429 {
+		fmt.Printf("\n[429] Too Many Requests on image download: %s. Exiting scraper...\n", imageURL)
+		os.Exit(429)
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return 0, fmt.Errorf("image request failed: %s", resp.Status)
