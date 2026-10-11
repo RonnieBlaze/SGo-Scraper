@@ -10,7 +10,7 @@ A concurrent, rate-limited, and database-tracked SuicideGirls media scraper writ
 *   **📂 Structured Folder Layout**: Organizes all model downloads under a unified directory structure:
     `downloadsDir/<modelName>/{photos, candids, videos}`.
 *   **📊 Dynamic Terminal Progress Bar**: Displays real-time download status, item counts, and total downloaded data (in MB) with clean error formatting.
-*   **⏳ Rate-Limited Concurrency**: Staggers downloads with exactly 5 concurrent workers spaced out by a 500ms delay to prevent connection resets and rate-limiting blocks.
+*   **⏳ Rate-Limited Concurrency**: Staggers downloads with 5 concurrent workers spaced out by a configurable delay (`DOWNLOAD_DELAY_MS`, default 2000ms) to prevent connection resets and rate-limiting blocks.
 *   **🔍 Model Profile Sweeper**: Supplying a model's base URL (e.g., `https://www.suicidegirls.com/girls/modelname/`) will automatically check for and download their photosets, candids, videos, and blogs in sequence.
 *   **🛠️ Windows Path Sanitizer**: Automatically cleans up and collapses tabs, newlines (`\n`), carriage returns (`\r`), and multiple spaces in post titles to guarantee valid directory and filenames on Windows.
 *   **🔗 Group Thread Comment Downloader**: Downloads image attachments from group threads, grouping attachments comment-by-comment.
@@ -64,7 +64,9 @@ Create a `.env` file in the root directory:
 DOWNLOADSDIR="d:\Users\xxx\Downloads\SGo-Scraper-master-test\downloads"
 SESSIONIDTOKEN="your_suicidegirls_sessionid_cookie"
 SGCSRFTOKEN="your_sgcsrftoken_cookie"
-RSCIVID="your_rscivid_cookie"
+RSCI_VID="your_rscivid_cookie"
+DOWNLOAD_DELAY_MS=2000
+USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 ```
 
 ### Cookie Acquisition:
