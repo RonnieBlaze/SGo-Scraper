@@ -75,10 +75,11 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 	var totalBytes int64
 
 	printProgress("Downloading", 0, total, 0)
+	delay := getDownloadDelay()
 	for i, imageURL := range imagesFound {
 		sem <- struct{}{} // acquire slot before spawning
-		if i > 0 {
-			time.Sleep(500 * time.Millisecond) // delay between download starts
+		if i > 0 && delay > 0 {
+			time.Sleep(delay) // delay between download starts
 		}
 		wg.Add(1)
 		go func(i int, imageURL string) {
@@ -137,6 +138,10 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 		if err := ZipFiles(filepath.Join(albumDir, info.AlbumName+".zip"), filtered); err != nil {
 			panic(err)
 		}
+	}
+
+	if anySuccess && delay > 0 {
+		time.Sleep(delay)
 	}
 
 	//fmt.Println("Albums Done.")
@@ -243,9 +248,11 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 	if dbErr == nil {
 		db.Close()
 	}
-	fmt.Println("ModelDir:", modelDir) //debug info for looking directory name.
-	fmt.Println()
 	checkAndCreateDir(modelDir)
+
+	if len(imagesFound) == 1 {
+		fmt.Println("ModelDir:", modelDir)
+	}
 
 	idxStr := formatIndex(currIndex, totalCount)
 	fmt.Printf("%sCandid post %s/%s (%s) — %d image(s)\n", idxStr, modelName, postID, postName, len(imagesFound))
@@ -262,6 +269,10 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 		if db, err := getModelDB(modelName); err == nil {
 			defer db.Close()
 			markDownloaded(db, "candid", postID, postName)
+		}
+		delay := getDownloadDelay()
+		if delay > 0 {
+			time.Sleep(delay)
 		}
 		//fmt.Println("Done!")
 		fmt.Println()
@@ -281,10 +292,11 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 	var totalBytes int64
 
 	printProgress("Downloading", 0, total, 0)
+	delay := getDownloadDelay()
 	for i, imageURL := range imagesFound {
 		sem <- struct{}{} // acquire slot before spawning
-		if i > 0 {
-			time.Sleep(500 * time.Millisecond) // delay between download starts
+		if i > 0 && delay > 0 {
+			time.Sleep(delay) // delay between download starts
 		}
 		wg.Add(1)
 		go func(i int, imageURL string) {
@@ -309,6 +321,9 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 	if db, err := getModelDB(modelName); err == nil {
 		defer db.Close()
 		markDownloaded(db, "candid", postID, postName)
+	}
+	if delay > 0 {
+		time.Sleep(delay)
 	}
 	//fmt.Println("Done!")
 	fmt.Println()
@@ -415,6 +430,10 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 					markDownloaded(db, "group_comment", bucket.CommentID, commentSnippet)
 				}
 			}
+			delay := getDownloadDelay()
+			if delay > 0 {
+				time.Sleep(delay)
+			}
 			continue
 		}
 
@@ -426,10 +445,11 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 		sem := make(chan struct{}, 5) // limit to 5 simultaneous downloads
 		
 		printProgress(baseName, 0, total, 0)
+		delay := getDownloadDelay()
 		for i, imageURL := range bucket.Images {
 			sem <- struct{}{} // acquire slot before spawning
-			if i > 0 {
-				time.Sleep(500 * time.Millisecond) // delay between download starts
+			if i > 0 && delay > 0 {
+				time.Sleep(delay) // delay between download starts
 			}
 			wg.Add(1)
 			go func(i int, imageURL string) {
@@ -455,6 +475,9 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 				defer db.Close()
 				markDownloaded(db, "group_comment", bucket.CommentID, commentSnippet)
 			}
+		}
+		if delay > 0 {
+			time.Sleep(delay)
 		}
 	}
 }
@@ -499,8 +522,19 @@ func main() {
 	case strings.Contains(albumURL, "/groups/") && strings.Contains(albumURL, "/thread/"):
 		downloadGroupThread(albumURL, downloadsDir)
 
-	case strings.Contains(albumURL, "/videos/"):
+	case strings.Contains(albumURL, "/videos/") && !strings.Contains(albumURL, "/girls/") && !strings.Contains(albumURL, "/members/"):
 		downloadVideoPost(albumURL, downloadsDir, "", 1, 1)
+
+	case (strings.Contains(albumURL, "/girls/") || strings.Contains(albumURL, "/members/")) && strings.HasSuffix(strings.TrimSuffix(albumURL, "/"), "/videos"):
+		modelName := extractModelFromURL(albumURL)
+		videoLinks := getAllVideoLinks(strings.TrimSuffix(albumURL, "/") + "/")
+		fmt.Println("Found", len(videoLinks), "Videos")
+		for idx, link := range videoLinks {
+			downloadVideoPost(link, downloadsDir, modelName, idx+1, len(videoLinks))
+		}
+		if modelName != "" {
+			fmt.Printf("%s Finished Downloading...\n", modelName)
+		}
 
 	case strings.Contains(albumURL, "/album/"):
 		downloadAlbum(albumURL, downloadsDir, finalizeWithZip, false, 1, 1)
@@ -527,6 +561,20 @@ func main() {
 		if photoModel != "" {
 			fmt.Printf("%s Finished Downloading...\n", titleCaseModelName(photoModel))
 		}
+
+	case (strings.Contains(albumURL, "/girls/") || strings.Contains(albumURL, "/members/")) && strings.HasSuffix(strings.TrimSuffix(albumURL, "/"), "/blog"):
+		modelName := extractModelFromURL(albumURL)
+		blogLinks := getAllBlogLinks(strings.TrimSuffix(albumURL, "/"), modelName)
+		fmt.Println("Found", len(blogLinks), "Blog Posts")
+		for idx, link := range blogLinks {
+			downloadBlogPost(link, downloadsDir, idx+1, len(blogLinks))
+		}
+		if modelName != "" {
+			fmt.Printf("%s Finished Downloading...\n", modelName)
+		}
+
+	case strings.Contains(albumURL, "/blog/") && !strings.HasSuffix(strings.TrimSuffix(albumURL, "/"), "/blog"):
+		downloadBlogPost(albumURL, downloadsDir, 1, 1)
 
 	default:
 		parts := strings.Split(strings.TrimSuffix(albumURL, "/"), "/")
