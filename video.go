@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 var ogTitleRe = regexp.MustCompile(`(?i)<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']`)
@@ -190,12 +191,12 @@ func downloadVideoPost(videoURL string, downloadsDir string, expectedModel strin
 	}
 
 	checkAndCreateDir(modelDir)
+	fmt.Println("VideoDir:", modelDir)
 	idxStr := formatIndex(currIndex, totalCount)
 	output := filepath.Join(modelDir, fmt.Sprintf("%s - %s.mp4", videoID, postTitle))
 
 	fmt.Printf("%sVideo post %s/%s (%s) — downloading...\n", idxStr, modelName, videoID, postTitle)
-	headers := "Referer: https://www.suicidegirls.com/\r\n" +
-		"User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36\r\n"
+	headers := fmt.Sprintf("Referer: https://www.suicidegirls.com/\r\nUser-Agent: %s\r\n", getUserAgent())
 	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-headers", headers, "-y", "-i", streamURL, "-c", "copy", output)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -222,6 +223,11 @@ func downloadVideoPost(videoURL string, downloadsDir string, expectedModel strin
 	if db, err := getModelDB(modelName); err == nil {
 		defer db.Close()
 		markDownloaded(db, "video", videoID, postTitle)
+	}
+
+	delay := getDownloadDelay()
+	if delay > 0 {
+		time.Sleep(delay)
 	}
 
 	//fmt.Println("Done!")
