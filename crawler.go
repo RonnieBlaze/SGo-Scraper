@@ -6,10 +6,6 @@ import (
 	"fmt"
 	"html"
 	"io"
-	"net/http"
-	"net/http/cookiejar"
-	"net/url"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -107,7 +103,10 @@ func crawlGroupThreadImageBuckets(rawContents io.Reader) []GroupThreadImageBucke
 }
 
 func getGroupThreadTotalComments(threadURL string) int {
-	rawBytes := getContents(strings.TrimSuffix(threadURL, "/") + "/comments/all?lazy=1")
+	rawBytes, err := getContentsE(strings.TrimSuffix(threadURL, "/") + "/comments/all?lazy=1")
+	if err != nil {
+		return -1
+	}
 	m := regexp.MustCompile(`(?i)(\d[\d,]*)\s+comment`).FindSubmatch(rawBytes)
 	if len(m) < 2 {
 		return -1
@@ -122,6 +121,7 @@ func getGroupThreadTotalComments(threadURL string) int {
 
 func getAllGroupThreadImageBuckets(threadURL string) []GroupThreadImageBucket {
 	seenImgs := map[string]map[string]bool{}
+	orderedImgs := map[string][]string{} // keeps page order so numbering is stable
 	bucketMeta := map[string]GroupThreadImageBucket{}
 	var bucketOrder []string
 	base := strings.TrimSuffix(threadURL, "/")
@@ -138,7 +138,8 @@ func getAllGroupThreadImageBuckets(threadURL string) []GroupThreadImageBucket {
 		} else {
 			pageURL = fmt.Sprintf("%s&offset=%d", baseURL, offset)
 		}
-		fmt.Printf("[group] fetching offset=%d fallback=%t\n", offset, useFallback)
+		fmt.Println(dimText(fmt.Sprintf("[group] fetching offset=%d fallback=%t", offset, useFallback)))
+		pauseBeforeListingPage()
 		rawBytes, err := getContentsE(pageURL)
 		if err != nil {
 			if useFallback {
@@ -149,7 +150,7 @@ func getAllGroupThreadImageBuckets(threadURL string) []GroupThreadImageBucket {
 			if totalComments < 0 {
 				totalComments = getGroupThreadTotalComments(threadURL)
 				if totalComments > 0 {
-					fmt.Printf("[group] discovered total comments: %d\n", totalComments)
+					fmt.Println(dimText(fmt.Sprintf("[group] discovered total comments: %d", totalComments)))
 				}
 			}
 			continue
@@ -178,6 +179,7 @@ func getAllGroupThreadImageBuckets(threadURL string) []GroupThreadImageBucket {
 			for _, img := range bucket.Images {
 				if !seenImgs[key][img] {
 					seenImgs[key][img] = true
+					orderedImgs[key] = append(orderedImgs[key], img)
 					pageNewImages++
 				}
 			}
@@ -188,9 +190,9 @@ func getAllGroupThreadImageBuckets(threadURL string) []GroupThreadImageBucket {
 			totalImages += len(seenImgs[key])
 		}
 		if totalComments > 0 {
-			fmt.Printf("[group] progress: comments %d/%d, posts with images=%d, images=%d, last page posts=%d, last page new images=%d\n", offset, totalComments, seenPosts, totalImages, len(pageBuckets), pageNewImages)
+			fmt.Println(dimText(fmt.Sprintf("[group] progress: comments %d/%d, posts with images=%d, images=%d, last page posts=%d, last page new images=%d", offset, totalComments, seenPosts, totalImages, len(pageBuckets), pageNewImages)))
 		} else {
-			fmt.Printf("[group] progress: comments offset=%d, posts with images=%d, images=%d, last page posts=%d, last page new images=%d\n", offset, seenPosts, totalImages, len(pageBuckets), pageNewImages)
+			fmt.Println(dimText(fmt.Sprintf("[group] progress: comments offset=%d, posts with images=%d, images=%d, last page posts=%d, last page new images=%d", offset, seenPosts, totalImages, len(pageBuckets), pageNewImages)))
 		}
 		if useFallback {
 			if len(pageBuckets) == 0 {
@@ -210,7 +212,7 @@ func getAllGroupThreadImageBuckets(threadURL string) []GroupThreadImageBucket {
 				if totalComments < 0 {
 					totalComments = getGroupThreadTotalComments(threadURL)
 					if totalComments > 0 {
-						fmt.Printf("[group] discovered total comments: %d\n", totalComments)
+						fmt.Println(dimText(fmt.Sprintf("[group] discovered total comments: %d", totalComments)))
 					}
 				}
 				continue
@@ -225,9 +227,7 @@ func getAllGroupThreadImageBuckets(threadURL string) []GroupThreadImageBucket {
 	var result []GroupThreadImageBucket
 	for _, key := range bucketOrder {
 		meta := bucketMeta[key]
-		for img := range seenImgs[key] {
-			meta.Images = append(meta.Images, img)
-		}
+		meta.Images = orderedImgs[key]
 		result = append(result, meta)
 	}
 	return result
@@ -340,20 +340,19 @@ func getAlbumInfoImages(postID string) []string {
 		"https://www.suicidegirls.com/api/get_album_info/%s/?geometries=2432,1216",
 		postID,
 	)
-	client := newAuthedClient(apiURL)
-	req, err := http.NewRequest("GET", apiURL, nil)
+	req, err := newRequest(apiURL, "*/*")
 	if err != nil {
 		return nil
 	}
-	req.Header.Set("User-Agent", getUserAgent())
-	req.Header.Set("Accept", "*/*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("Referer", "https://www.suicidegirls.com/")
-	resp, err := client.Do(req)
-	if err != nil || resp.StatusCode != 200 {
+	resp, err := authedClient().Do(req)
+	if err != nil {
 		return nil
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil
+	}
 	var result struct {
 		Photos []struct {
 			AlbumPhotoID int               `json:"album_photo_id"`
@@ -617,112 +616,63 @@ func crawlVideoLinks(rawContents io.Reader) []string {
 
 // ── paginated sweeps ──────────────────────────────────────────────────────────
 
-func getAllAlbumLinks(modelURL string, modelName string) []string {
+// pauseBeforeListingPage waits DOWNLOAD_DELAY_MS before loading a listing or
+// comment page. Without it, listing pages went out back-to-back (especially
+// now that finished items are skipped instantly), and the candids listing
+// sometimes answered a quick burst with a 500 error.
+func pauseBeforeListingPage() {
+	if delay := getDownloadDelay(); delay > 0 {
+		time.Sleep(delay)
+	}
+}
+
+// getAllLinks follows a listing's ?offset= pages and collects the links that
+// crawl finds on each. If a page fails to load, it's recorded as a failure and
+// the links found so far are returned, so the rest of the run carries on.
+func getAllLinks(listURL string, crawl func(io.Reader) []string) []string {
 	var all []string
 	seen := map[string]bool{}
 	offset := 0
 	for {
-		var pageURL string
-		if offset == 0 {
-			pageURL = modelURL
-		} else {
-			pageURL = fmt.Sprintf("%s?offset=%d", modelURL, offset)
+		pageURL := listURL
+		if offset > 0 {
+			pageURL = fmt.Sprintf("%s?offset=%d", listURL, offset)
 		}
-		rawBytes := getContents(pageURL)
-		for _, link := range crawlAlbums(bytes.NewReader(rawBytes), modelName) {
+		pauseBeforeListingPage()
+		rawBytes, err := getContentsE(pageURL)
+		if err != nil {
+			recordFailure(pageURL, fmt.Errorf("listing page failed, later pages skipped: %v", err))
+			break
+		}
+		for _, link := range crawl(bytes.NewReader(rawBytes)) {
 			if !seen[link] {
 				seen[link] = true
 				all = append(all, link)
 			}
 		}
 		nextOffset := getNextOffset(bytes.NewReader(rawBytes))
-		if nextOffset < 0 {
+		if nextOffset < 0 || nextOffset == offset {
 			break
 		}
 		offset = nextOffset
 	}
 	return all
+}
+
+func getAllAlbumLinks(modelURL string, modelName string) []string {
+	return getAllLinks(modelURL, func(r io.Reader) []string { return crawlAlbums(r, modelName) })
 }
 
 func getAllMemberAlbumLinks(modelURL string, modelName string) []string {
-	var all []string
-	seen := map[string]bool{}
-	offset := 0
-	for {
-		var pageURL string
-		if offset == 0 {
-			pageURL = modelURL
-		} else {
-			pageURL = fmt.Sprintf("%s?offset=%d", modelURL, offset)
-		}
-		rawBytes := getContents(pageURL)
-		for _, link := range crawlMemberAlbums(bytes.NewReader(rawBytes), modelName) {
-			if !seen[link] {
-				seen[link] = true
-				all = append(all, link)
-			}
-		}
-		nextOffset := getNextOffset(bytes.NewReader(rawBytes))
-		if nextOffset < 0 {
-			break
-		}
-		offset = nextOffset
-	}
-	return all
+	return getAllLinks(modelURL, func(r io.Reader) []string { return crawlMemberAlbums(r, modelName) })
 }
 
 func getAllBlogLinks(modelURL string, modelName string) []string {
-	var all []string
-	seen := map[string]bool{}
-	offset := 0
-	for {
-		var pageURL string
-		if offset == 0 {
-			pageURL = modelURL
-		} else {
-			pageURL = fmt.Sprintf("%s?offset=%d", modelURL, offset)
-		}
-		rawBytes := getContents(pageURL)
-		for _, link := range crawlBlogLinks(bytes.NewReader(rawBytes), modelName) {
-			if !seen[link] {
-				seen[link] = true
-				all = append(all, link)
-			}
-		}
-		nextOffset := getNextOffset(bytes.NewReader(rawBytes))
-		if nextOffset < 0 {
-			break
-		}
-		offset = nextOffset
-	}
-	return all
+	return getAllLinks(modelURL, func(r io.Reader) []string { return crawlBlogLinks(r, modelName) })
 }
 
 func getAllVideoLinks(modelURL string) []string {
-	var all []string
-	seen := map[string]bool{}
-	offset := 0
-	for {
-		var pageURL string
-		if offset == 0 {
-			pageURL = modelURL
-		} else {
-			pageURL = fmt.Sprintf("%s?offset=%d", modelURL, offset)
-		}
-		rawBytes := getContents(pageURL)
-		for _, link := range crawlVideoLinks(bytes.NewReader(rawBytes)) {
-			if !seen[link] {
-				seen[link] = true
-				all = append(all, link)
-			}
-		}
-		nextOffset := getNextOffset(bytes.NewReader(rawBytes))
-		if nextOffset < 0 {
-			break
-		}
-		offset = nextOffset
-	}
-	return all
+	return getAllLinks(modelURL, crawlVideoLinks)
 }
 
 // ── page helpers ──────────────────────────────────────────────────────────────
@@ -770,7 +720,7 @@ func parsePageInfo(rawTitle string) PageInfo {
 		model := strings.TrimSpace(strings.SplitN(rest, " | ", 2)[0])
 		return PageInfo{ModelName: sanitizeName(model), PostName: sanitizeName(postName), IsCandid: true}
 	}
-	fmt.Println("Warning: unrecognised title format:", rawTitle)
+	fmt.Println(warnText("Warning: unrecognised title format: " + rawTitle))
 	return PageInfo{ModelName: sanitizeName(cleanTitle)}
 }
 
@@ -816,7 +766,15 @@ func getAlbumDate(rawContents io.Reader) (time.Time, error) {
 							return parsed, nil
 						}
 						if parsed, err := time.Parse("Jan 2", text); err == nil {
-							return parsed.AddDate(time.Now().Year(), 0, 0), nil
+							// The site leaves the year off recent dates. Use the
+							// current year unless that puts the date in the future
+							// (e.g. a December album seen in January).
+							now := time.Now()
+							d := parsed.AddDate(now.Year(), 0, 0)
+							if d.After(now) {
+								d = d.AddDate(-1, 0, 0)
+							}
+							return d, nil
 						}
 					}
 				}
@@ -824,81 +782,6 @@ func getAlbumDate(rawContents io.Reader) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("date not found in page")
-}
-
-func newAuthedClient(target string) http.Client {
-	sessionidCookie := os.Getenv("SESSIONIDTOKEN")
-	sgcsrftoken := os.Getenv("SGCSRFTOKEN")
-	rsciVid := os.Getenv("RSCIVID")
-
-	jar, _ := cookiejar.New(nil)
-	cookieData := []struct{ name, value string }{
-		{"sessid", sessionidCookie},
-		{"sgcsrftoken", sgcsrftoken},
-		{"rscivid", rsciVid},
-	}
-	var cookies []*http.Cookie
-	for _, c := range cookieData {
-		if c.value == "" {
-			continue
-		}
-		cookies = append(cookies, &http.Cookie{
-			Name: c.name, Value: c.value,
-			Path: "/", Domain: ".suicidegirls.com",
-		})
-	}
-	for _, base := range []string{target, "https://www.suicidegirls.com", "https://suicidegirls.com"} {
-		if u, err := url.Parse(base); err == nil {
-			jar.SetCookies(u, cookies)
-		}
-	}
-	return http.Client{Jar: jar, Timeout: 120 * time.Second}
-}
-
-// getContents fetches a URL and returns its body as bytes, panicking on any
-// error. The response body is always closed, the HTTP status is checked, and
-// the client has a timeout, so callers no longer leak connections or silently
-// consume error pages. For fallible fetches (e.g. paginated fallbacks), use
-// getContentsE.
-func getContents(link string) []byte {
-	rawBytes, err := getContentsE(link)
-	if err != nil {
-		panic(err)
-	}
-	return rawBytes
-}
-
-// getContentsE is the error-returning variant of getContents. It returns the
-// body bytes and any error (transport error or non-2xx status) so callers can
-// react — for example, the group-thread comment pagination falls back to an
-// alternate URL scheme on failure.
-func getContentsE(link string) ([]byte, error) {
-	client := newAuthedClient(link)
-	req, err := http.NewRequest("GET", link, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", getUserAgent())
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
-	req.Header.Set("Referer", "https://www.suicidegirls.com/")
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == 429 {
-		fmt.Printf("\n[429] Too Many Requests on page fetch: %s. Exiting scraper...\n", link)
-		os.Exit(429)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("request to %s failed: %s", link, resp.Status)
-	}
-	rawBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	return rawBytes, nil
 }
 
 func getValueFromAttribute(t gohtml.Token, attr string) string {

@@ -1,4 +1,11 @@
+downloads
 SGo-Scraper
 .env
 txt
 html
+
+# Built binary, download history, the watcher queue, and unfinished downloads
+*.exe
+modelsdb/
+Incoming/
+*.part

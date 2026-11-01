@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -127,8 +131,7 @@ func parseVideoInfo(videoURL string, rawBytes []byte, expectedModel string) (str
 	// Fallback to scanning page HTML for model profile links if modelName is still Unknown/empty
 	if modelName == "Unknown" || modelName == "" {
 		loggedInUser := ""
-		userRe := regexp.MustCompile(`sg-user_name="([^"]+)"`)
-		if um := userRe.FindSubmatch(rawBytes); len(um) > 1 {
+		if um := loggedInUserRe.FindSubmatch(rawBytes); len(um) > 1 {
 			loggedInUser = string(um[1])
 		}
 
@@ -148,17 +151,82 @@ func parseVideoInfo(videoURL string, rawBytes []byte, expectedModel string) (str
 	return videoID, truncateName(postTitle, 80), truncateName(modelName, 80)
 }
 
+// videoStallTimeout is how long a video download may go without the output
+// file growing before it's treated as hung.
+const videoStallTimeout = 2 * time.Minute
+
+const defaultVideoTimeout = 180 * time.Minute
+
+// getVideoTimeout returns the most time one video download may take, from
+// VIDEO_TIMEOUT_MIN in .env.
+func getVideoTimeout() time.Duration {
+	if mins, err := strconv.Atoi(strings.TrimSpace(os.Getenv("VIDEO_TIMEOUT_MIN"))); err == nil && mins > 0 {
+		return time.Duration(mins) * time.Minute
+	}
+	return defaultVideoTimeout
+}
+
+// watchForStall cancels the download if the file at path stops growing for
+// videoStallTimeout, which catches a stream that hangs without erroring. The
+// returned flag is set when that happens.
+func watchForStall(ctx context.Context, path string, cancel context.CancelFunc) *atomic.Bool {
+	var stalled atomic.Bool
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		lastSize := int64(-1)
+		lastChange := time.Now()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				var size int64
+				if fi, err := os.Stat(path); err == nil {
+					size = fi.Size()
+				}
+				if size != lastSize {
+					lastSize = size
+					lastChange = time.Now()
+				} else if time.Since(lastChange) >= videoStallTimeout {
+					stalled.Store(true)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return &stalled
+}
+
 func downloadVideoPost(videoURL string, downloadsDir string, expectedModel string, currIndex, totalCount int) {
-	rawBytes := getContents(videoURL)
+	// Skip a finished video without loading its page when the model is known
+	// from the sweep or the URL. Otherwise the page-based check below runs.
+	model := expectedModel
+	if model == "" {
+		model = extractModelFromURL(videoURL)
+	}
+	if model != "" {
+		model = titleCaseModelName(model)
+		if id := idAfter(videoURL, "videos"); knownDownloaded(model, id, "video") {
+			printSkip(formatIndex(currIndex, totalCount), fmt.Sprintf("[skip] Video %s/%s — already in database", model, id))
+			return
+		}
+	}
+
+	rawBytes, err := getContentsE(videoURL)
+	if err != nil {
+		recordFailure(videoURL, err)
+		return
+	}
 
 	videoID, postTitle, modelName := parseVideoInfo(videoURL, rawBytes, expectedModel)
 
-	db, dbErr := getModelDB(modelName)
-	if dbErr == nil {
-		if isDownloaded(db, "video", videoID) {
-			db.Close()
-			idxStr := formatIndex(currIndex, totalCount)
-			fmt.Printf("%s[skip] Video %s/%s — already in database\n", idxStr, modelName, videoID)
+	if db, err := getModelDB(modelName); err == nil {
+		done := isDownloaded(db, "video", videoID)
+		db.Close()
+		if done {
+			printSkip(formatIndex(currIndex, totalCount), fmt.Sprintf("[skip] Video %s/%s — already in database", modelName, videoID))
 			return
 		}
 	}
@@ -166,64 +234,77 @@ func downloadVideoPost(videoURL string, downloadsDir string, expectedModel strin
 	modelDir := filepath.Join(downloadsDir, modelName, "videos")
 
 	// Skip if already downloaded.
-	if entries, err := os.ReadDir(modelDir); err == nil {
-		for _, e := range entries {
-			if strings.HasPrefix(e.Name(), videoID) {
-				idxStr := formatIndex(currIndex, totalCount)
-				fmt.Printf("%s[skip] Video %s/%s — already on disk\n", idxStr, modelName, videoID)
-				if dbErr == nil {
-					markDownloaded(db, "video", videoID, postTitle)
-					db.Close()
-				}
-				return
-			}
+	if findExistingEntry(modelDir, videoID+" - ", false) != "" {
+		printSkip(formatIndex(currIndex, totalCount), fmt.Sprintf("[skip] Video %s/%s — already on disk", modelName, videoID))
+		if db, err := getModelDB(modelName); err == nil {
+			markDownloaded(db, "video", videoID, postTitle)
+			db.Close()
 		}
-	}
-	if dbErr == nil {
-		db.Close()
+		return
 	}
 
 	streamURL := crawlVideoStream(bytes.NewReader(rawBytes))
 	if streamURL == "" {
 		idxStr := formatIndex(currIndex, totalCount)
-		fmt.Printf("%sVideo %s/%s — could not find stream URL\n", idxStr, modelName, videoID)
+		fmt.Println(idxStr + errorText(fmt.Sprintf("Video %s/%s — could not find stream URL", modelName, videoID)))
+		recordFailure(videoURL, fmt.Errorf("could not find stream URL"))
 		return
 	}
 
 	checkAndCreateDir(modelDir)
-	fmt.Println("VideoDir:", modelDir)
+	fmt.Println(dimText("VideoDir: " + modelDir))
 	idxStr := formatIndex(currIndex, totalCount)
 	output := filepath.Join(modelDir, fmt.Sprintf("%s - %s.mp4", videoID, postTitle))
 
-	fmt.Printf("%sVideo post %s/%s (%s) — downloading...\n", idxStr, modelName, videoID, postTitle)
+	fmt.Println(idxStr + itemText(fmt.Sprintf("Video post %s/%s (%s) — downloading...", modelName, videoID, postTitle)))
 	headers := fmt.Sprintf("Referer: https://www.suicidegirls.com/\r\nUser-Agent: %s\r\n", getUserAgent())
-	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-headers", headers, "-y", "-i", streamURL, "-c", "copy", output)
+	// Write to a ".part" file and rename on success, so an interrupted run
+	// never leaves a file the skip-on-rerun check treats as finished.
+	partial := output + ".part"
+	timeout := getVideoTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error", "-headers", headers, "-y", "-i", streamURL, "-c", "copy", "-f", "mp4", partial)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	stalled := watchForStall(ctx, partial, cancel)
 	if err := cmd.Run(); err != nil {
-		fmt.Printf("Video %s/%s — ffmpeg failed: %v\n", modelName, videoID, err)
-		// Remove any partial output so the skip-on-rerun check (prefix match
-		// on videoID) doesn't treat a failed download as "already on disk".
-		os.Remove(output)
+		switch {
+		case stalled.Load():
+			err = fmt.Errorf("no data received for %s, gave up", videoStallTimeout)
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			err = fmt.Errorf("took longer than %s, gave up (raise VIDEO_TIMEOUT_MIN in .env if needed)", timeout)
+		default:
+			err = fmt.Errorf("ffmpeg failed: %v", err)
+		}
+		fmt.Println(errorText(fmt.Sprintf("Video %s/%s — %v", modelName, videoID, err)))
+		os.Remove(partial)
+		recordFailure(videoURL, err)
 		return
 	}
 
-	info, err := os.Stat(output)
-	if err != nil {
-		fmt.Printf("Video %s/%s — output file missing\n", modelName, videoID)
+	info, err := os.Stat(partial)
+	if err != nil || info.Size() == 0 {
+		fmt.Println(errorText(fmt.Sprintf("Video %s/%s — output file is missing or empty", modelName, videoID)))
+		os.Remove(partial)
+		recordFailure(videoURL, fmt.Errorf("output file is missing or empty"))
 		return
 	}
 
-	if info.Size() == 0 {
-		fmt.Printf("Video %s/%s — output file is empty\n", modelName, videoID)
-		os.Remove(output)
+	if err := os.Rename(partial, output); err != nil {
+		os.Remove(partial)
+		recordFailure(videoURL, err)
 		return
 	}
 
 	if db, err := getModelDB(modelName); err == nil {
-		defer db.Close()
 		markDownloaded(db, "video", videoID, postTitle)
+		db.Close()
 	}
+	runStats.downloaded++
+	runStats.bytes += info.Size()
+	// Videos have no progress bar, so confirm the finished file.
+	fmt.Println(okText(fmt.Sprintf("Saved %s (%.2f MB)", filepath.Base(output), float64(info.Size())/1024/1024)))
 
 	delay := getDownloadDelay()
 	if delay > 0 {

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -42,58 +41,6 @@ func checkAndCreateDir(path string) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		os.MkdirAll(path, os.ModePerm)
 	}
-}
-
-// saveImage is used for proper album sets, blog images, and group threads.
-func saveImage(imageURL string, output string) (int64, error) {
-	client := newAuthedClient(imageURL)
-	req, err := http.NewRequest("GET", imageURL, nil)
-	if err != nil {
-		return 0, err
-	}
-
-	req.Header.Set("User-Agent", getUserAgent())
-	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
-	req.Header.Set("Referer", "https://www.suicidegirls.com/")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 429 {
-		fmt.Printf("\n[429] Too Many Requests on image download: %s. Exiting scraper...\n", imageURL)
-		os.Exit(429)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return 0, fmt.Errorf("image request failed: %s", resp.Status)
-	}
-
-	if ct := resp.Header.Get("Content-Type"); strings.Contains(strings.ToLower(ct), "text/html") {
-		return 0, fmt.Errorf("image URL returned HTML (likely ad redirect): %s", ct)
-	}
-
-	img, err := os.Create(output)
-	if err != nil {
-		return 0, err
-	}
-	defer img.Close()
-
-	n, err := io.Copy(img, resp.Body)
-	if err != nil {
-		return n, err
-	}
-
-	if lastMod := resp.Header.Get("Last-Modified"); lastMod != "" {
-		if t, err := http.ParseTime(lastMod); err == nil {
-			os.Chtimes(output, t, t)
-		}
-	}
-
-	return n, nil
 }
 
 func ZipFiles(filename string, files []string) error {
@@ -161,16 +108,16 @@ func getDBDir() string {
 	return dbDir
 }
 
+func modelDBPath(modelName string) string {
+	return filepath.Join(getDBDir(), sanitizeName(modelName)+".db")
+}
+
 func getModelDB(modelName string) (*sql.DB, error) {
-	dbDir := getDBDir()
-	safeModel := sanitizeName(modelName)
-	dbPath := filepath.Join(dbDir, safeModel+".db")
-	
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", modelDBPath(modelName))
 	if err != nil {
 		return nil, err
 	}
-	
+
 	schema := `
 	CREATE TABLE IF NOT EXISTS downloads (
 		type TEXT,
@@ -190,12 +137,12 @@ func getModelDB(modelName string) (*sql.DB, error) {
 func getGroupDB() (*sql.DB, error) {
 	dbDir := getDBDir()
 	dbPath := filepath.Join(dbDir, "groups.db")
-	
+
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	schema := `
 	CREATE TABLE IF NOT EXISTS downloads (
 		type TEXT,
@@ -224,12 +171,109 @@ func isDownloaded(db *sql.DB, itemType string, itemID string) bool {
 	return exists
 }
 
+// knownDownloaded reports whether itemID is recorded under any of types in
+// modelName's history. Unlike getModelDB it never creates a database, so a
+// guessed model name that doesn't match an existing history is harmless. It
+// lets the scraper skip finished items without loading their pages.
+func knownDownloaded(modelName, itemID string, types ...string) bool {
+	if modelName == "" || itemID == "" {
+		return false
+	}
+	if _, err := os.Stat(modelDBPath(modelName)); err != nil {
+		return false
+	}
+	db, err := getModelDB(modelName)
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+	for _, t := range types {
+		if isDownloaded(db, t, itemID) {
+			return true
+		}
+	}
+	return false
+}
+
+// idAfter returns the URL path segment that follows the first of segments
+// found, e.g. "123" for ".../album/123/name/" with segment "album".
+func idAfter(rawURL string, segments ...string) string {
+	parts := strings.Split(strings.TrimSuffix(rawURL, "/"), "/")
+	for i, p := range parts {
+		for _, s := range segments {
+			if p == s && i+1 < len(parts) {
+				return parts[i+1]
+			}
+		}
+	}
+	return ""
+}
+
 func markDownloaded(db *sql.DB, itemType string, itemID string, title string) error {
 	if db == nil {
 		return nil
 	}
 	_, err := db.Exec("INSERT OR REPLACE INTO downloads (type, item_id, title) VALUES (?, ?, ?)", itemType, itemID, title)
 	return err
+}
+
+// findExistingEntry returns the name of the first entry in dir whose name
+// starts with prefix (and is a directory when wantDir is set), ignoring
+// unfinished ".part" downloads. It returns "" when there is none.
+func findExistingEntry(dir, prefix string, wantDir bool) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix) && !strings.HasSuffix(e.Name(), ".part") && e.IsDir() == wantDir {
+			return e.Name()
+		}
+	}
+	return ""
+}
+
+// failedItems collects items that could not be fully downloaded. They are
+// left out of the database so the next run retries them.
+var failedItems []string
+
+func recordFailure(item string, err error) {
+	fmt.Println(errorText(fmt.Sprintf("Failed: %s — %v", item, err)))
+	failedItems = append(failedItems, fmt.Sprintf("%s (%v)", item, err))
+}
+
+// runStats counts what happened during the run, for the summary at the end.
+// Items are processed one at a time, so no locking is needed.
+var runStats struct {
+	downloaded int
+	skipped    int
+	bytes      int64
+}
+
+// showSkips controls whether "[skip]" lines are printed; SHOW_SKIPS=off in
+// .env hides them. Skips are counted for the summary either way.
+var showSkips = true
+
+// printSkip reports an item that needed no download.
+func printSkip(idxStr, msg string) {
+	runStats.skipped++
+	if showSkips {
+		fmt.Println(idxStr + dimText(msg))
+	}
+}
+
+// printSummary prints one line totalling the run.
+func printSummary(elapsed time.Duration) {
+	failed := fmt.Sprintf("Failed %d", len(failedItems))
+	if len(failedItems) > 0 {
+		failed = errorText(failed)
+	}
+	fmt.Printf("%s %s · %s · %s · %.2f MB\n",
+		headingText(fmt.Sprintf("Done in %s —", elapsed.Round(time.Second))),
+		okText(fmt.Sprintf("Downloaded %d", runStats.downloaded)),
+		dimText(fmt.Sprintf("Skipped %d", runStats.skipped)),
+		failed,
+		float64(runStats.bytes)/1024/1024)
 }
 
 func formatIndex(curr, total int) string {
@@ -240,5 +284,5 @@ func formatIndex(curr, total int) string {
 	if width < 2 {
 		width = 2
 	}
-	return fmt.Sprintf("[%0*d/%0*d] ", width, curr, width, total)
+	return indexText(fmt.Sprintf("[%0*d/%0*d]", width, curr, width, total)) + " "
 }

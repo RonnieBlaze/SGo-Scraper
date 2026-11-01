@@ -3,23 +3,95 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
-	"path/filepath"
 	"time"
 
 	"github.com/joho/godotenv"
 )
 
+// Exit codes other than 0 and 429. The watcher uses these to decide whether
+// to retry a URL or park it in Incoming\Failed.
+const (
+	exitSomeFailed  = 3 // the run finished, but some items failed
+	exitLoginFailed = 4 // the cookies in .env don't log in
+	exitBadURL      = 5 // the URL isn't one the scraper handles
+)
+
+// downloadImages fetches urls into the files named by pathFor, up to 5 at a
+// time with the configured delay between starts. It returns the path each
+// image was saved to ("" where it failed) and how many failed.
+func downloadImages(label string, urls []string, pathFor func(i int) string) ([]string, int) {
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	saved := make([]string, len(urls))
+	total := len(urls)
+	sem := make(chan struct{}, 5) // limit to 5 simultaneous downloads
+
+	completed := 0
+	failed := 0
+	var totalBytes int64
+
+	printProgress(label, 0, total, 0)
+	delay := getDownloadDelay()
+	for i, imageURL := range urls {
+		sem <- struct{}{} // acquire slot before spawning
+		if i > 0 && delay > 0 {
+			time.Sleep(delay) // delay between download starts
+		}
+		wg.Add(1)
+		go func(i int, imageURL string) {
+			defer wg.Done()
+			defer func() { <-sem }() // release slot when finished
+
+			path, b, err := saveImage(imageURL, pathFor(i))
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				fmt.Printf("\r%s\r%s\n", strings.Repeat(" ", 85), errorText(fmt.Sprintf("Error: %s [%04d/%04d] — %v", label, i+1, total, err)))
+				failed++
+			} else {
+				saved[i] = path
+				totalBytes += b
+			}
+			completed++
+			printProgress(label, completed, total, totalBytes)
+		}(i, imageURL)
+	}
+
+	wg.Wait()
+	runStats.bytes += totalBytes
+	return saved, failed
+}
+
 func downloadAlbum(albumURL string, downloadsDir string, finalizeWithZip bool, isCandid bool, currIndex, totalCount int) {
-	rawBytes := getContents(albumURL)
+	// The ID and model are in the URL, so a finished item can be skipped
+	// without loading its page. If the URL's model doesn't match the history
+	// name, this finds nothing and the page-based check below still runs.
+	if model, id := extractModelFromURL(albumURL), idAfter(albumURL, "album", "blog"); knownDownloaded(model, id, "album", "candid") {
+		kind := "Album"
+		if isCandid || strings.Contains(albumURL, "/blog/") {
+			kind = "Candid post"
+		}
+		printSkip(formatIndex(currIndex, totalCount), fmt.Sprintf("[skip] %s %s/%s — already in database", kind, model, id))
+		return
+	}
+
+	rawBytes, err := getContentsE(albumURL)
+	if err != nil {
+		recordFailure(albumURL, err)
+		return
+	}
 
 	info := parsePageInfo(getTitle(bytes.NewReader(rawBytes)))
 
 	if totalCount <= 1 && extractModelFromURL(albumURL) == "" && info.ModelName != "" {
-		fmt.Println("Model:", info.ModelName)
-		fmt.Println("ModelDir:", filepath.Join(downloadsDir, info.ModelName))
+		fmt.Println("Model:", headingText(info.ModelName))
+		fmt.Println(dimText("ModelDir: " + filepath.Join(downloadsDir, info.ModelName)))
 		fmt.Println()
 	}
 
@@ -45,12 +117,11 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 		}
 	}
 
-	db, dbErr := getModelDB(info.ModelName)
-	if dbErr == nil {
-		defer db.Close()
-		if isDownloaded(db, "album", albumID) {
-			idxStr := formatIndex(currIndex, totalCount)
-			fmt.Printf("%s[skip] Album %s/%s — already in database\n", idxStr, info.ModelName, albumID)
+	if db, err := getModelDB(info.ModelName); err == nil {
+		done := isDownloaded(db, "album", albumID)
+		db.Close()
+		if done {
+			printSkip(formatIndex(currIndex, totalCount), fmt.Sprintf("[skip] Album %s/%s — already in database", info.ModelName, albumID))
 			return
 		}
 	}
@@ -59,62 +130,27 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 	albumDate, dateErr := getAlbumDate(bytes.NewReader(rawBytes))
 
 	idxStr := formatIndex(currIndex, totalCount)
-	fmt.Printf("%sFound %q set from %s — %d image(s). Downloading...\n", idxStr, info.AlbumName, info.ModelName, len(imagesFound))
+	fmt.Println(idxStr + itemText(fmt.Sprintf("Found %q set from %s — %d image(s). Downloading...", info.AlbumName, info.ModelName, len(imagesFound))))
 
 	albumDir := filepath.Join(downloadsDir, info.ModelName, "photos", info.ModelName+" - "+info.AlbumName)
-	fmt.Println("AlbumDir:", albumDir) //debug info for looking directory name.
+	fmt.Println(dimText("AlbumDir: " + albumDir)) //debug info for looking directory name.
 	checkAndCreateDir(albumDir)
 
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	imagesDownloaded := make([]string, len(imagesFound))
+	imagesDownloaded, failed := downloadImages("Downloading", imagesFound, func(i int) string {
+		return filepath.Join(albumDir, fmt.Sprintf("%s - %04d.jpg", albumID, i+1))
+	})
 	total := len(imagesFound)
-	sem := make(chan struct{}, 5) // limit to 5 simultaneous downloads
 
-	completed := 0
-	var totalBytes int64
-
-	printProgress("Downloading", 0, total, 0)
-	delay := getDownloadDelay()
-	for i, imageURL := range imagesFound {
-		sem <- struct{}{} // acquire slot before spawning
-		if i > 0 && delay > 0 {
-			time.Sleep(delay) // delay between download starts
-		}
-		wg.Add(1)
-		go func(i int, imageURL string) {
-			defer wg.Done()
-			defer func() { <-sem }() // release slot when finished
-			
-			imageOutput := filepath.Join(albumDir, fmt.Sprintf("%s - %04d.jpg", albumID, i+1))
-			b, err := saveImage(imageURL, imageOutput)
-			
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				fmt.Printf("\r%s\rError: [%04d/%04d] — %v\n", strings.Repeat(" ", 85), i+1, total, err)
-			} else {
-				imagesDownloaded[i] = imageOutput
-				totalBytes += b
-			}
-			completed++
-			printProgress("Downloading", completed, total, totalBytes)
-		}(i, imageURL)
-	}
-
-	wg.Wait()
-
-	anySuccess := false
-	for _, f := range imagesDownloaded {
-		if f != "" {
-			anySuccess = true
-			break
-		}
-	}
-	if anySuccess {
+	switch {
+	case total == 0:
+		recordFailure(albumURL, fmt.Errorf("no images found"))
+	case failed > 0:
+		recordFailure(albumURL, fmt.Errorf("%d of %d images failed", failed, total))
+	default:
+		runStats.downloaded++
 		if db, err := getModelDB(info.ModelName); err == nil {
-			defer db.Close()
 			markDownloaded(db, "album", albumID, info.AlbumName)
+			db.Close()
 		}
 	}
 
@@ -125,7 +161,7 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 			}
 		}
 	} else {
-		fmt.Println("Warning: could not determine album date:", dateErr)
+		fmt.Println(warnText(fmt.Sprint("Warning: could not determine album date: ", dateErr)))
 	}
 
 	if finalizeWithZip {
@@ -136,11 +172,11 @@ func downloadProperAlbum(albumURL string, rawBytes []byte, info PageInfo, downlo
 			}
 		}
 		if err := ZipFiles(filepath.Join(albumDir, info.AlbumName+".zip"), filtered); err != nil {
-			panic(err)
+			recordFailure(albumURL, fmt.Errorf("zipping failed: %v", err))
 		}
 	}
 
-	if anySuccess && delay > 0 {
+	if delay := getDownloadDelay(); failed < total && delay > 0 {
 		time.Sleep(delay)
 	}
 
@@ -199,6 +235,15 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 	}
 	postName = truncateName(postName, 80)
 
+	if db, err := getModelDB(modelName); err == nil {
+		done := isDownloaded(db, "candid", postID)
+		db.Close()
+		if done {
+			printSkip(formatIndex(currIndex, totalCount), fmt.Sprintf("[skip] Candid post %s/%s — already in database", modelName, postID))
+			return
+		}
+	}
+
 	// Use the API first; it returns permanent /cache/ URLs, not expiring /temp/ ones.
 	imagesFound := getAlbumInfoImages(postID)
 	if len(imagesFound) == 0 {
@@ -214,115 +259,58 @@ func downloadCandidPost(albumURL string, rawBytes []byte, info PageInfo, downloa
 		imagesFound = crawlBlogImagesRegex(rawBytes)
 	}
 	if len(imagesFound) == 0 {
-		idxStr := formatIndex(currIndex, totalCount)
-		fmt.Printf("%sCandid post %s/%s — no images found, skipping\n", idxStr, modelName, postID)
+		printSkip(formatIndex(currIndex, totalCount), fmt.Sprintf("Candid post %s/%s — no images found, skipping", modelName, postID))
 		return
-	}
-
-	db, dbErr := getModelDB(modelName)
-	if dbErr == nil {
-		if isDownloaded(db, "candid", postID) {
-			db.Close()
-			idxStr := formatIndex(currIndex, totalCount)
-			fmt.Printf("%s[skip] Candid post %s/%s — already in database\n", idxStr, modelName, postID)
-			return
-		}
 	}
 
 	modelDir := filepath.Join(downloadsDir, modelName, "candids")
+	entryPrefix := postID + " - "
 
-	// Skip if already downloaded.
-	if entries, err := os.ReadDir(modelDir); err == nil {
-		for _, e := range entries {
-			if strings.HasPrefix(e.Name(), postID) {
-				idxStr := formatIndex(currIndex, totalCount)
-				fmt.Printf("%s[skip] Candid post %s/%s — already on disk\n", idxStr, modelName, postID)
-				if dbErr == nil {
-					markDownloaded(db, "candid", postID, postName)
-					db.Close()
-				}
-				return
-			}
+	// Single-image posts already on disk (e.g. from before the database
+	// existed) are recorded and skipped. Multi-image posts reuse their existing
+	// folder below and only fetch the images that are missing.
+	if len(imagesFound) == 1 && findExistingEntry(modelDir, entryPrefix, false) != "" {
+		printSkip(formatIndex(currIndex, totalCount), fmt.Sprintf("[skip] Candid post %s/%s — already on disk", modelName, postID))
+		if db, err := getModelDB(modelName); err == nil {
+			markDownloaded(db, "candid", postID, postName)
+			db.Close()
 		}
-	}
-	if dbErr == nil {
-		db.Close()
+		return
 	}
 	checkAndCreateDir(modelDir)
 
-	if len(imagesFound) == 1 {
-		fmt.Println("ModelDir:", modelDir)
-	}
-
 	idxStr := formatIndex(currIndex, totalCount)
-	fmt.Printf("%sCandid post %s/%s (%s) — %d image(s)\n", idxStr, modelName, postID, postName, len(imagesFound))
+	fmt.Println(idxStr + itemText(fmt.Sprintf("Candid post %s/%s (%s) — %d image(s)", modelName, postID, postName, len(imagesFound))))
 
+	var pathFor func(i int) string
 	if len(imagesFound) == 1 {
-		printProgress("Downloading", 0, 1, 0)
-		imageOutput := filepath.Join(modelDir, fmt.Sprintf("%s - %s - 0001.jpg", postID, postName))
-		b, err := saveImage(imagesFound[0], imageOutput)
-		if err != nil {
-			fmt.Printf("\r%s\rError: [0001/0001] — %v\n", strings.Repeat(" ", 85), err)
-			return
+		fmt.Println(dimText("ModelDir: " + modelDir))
+		pathFor = func(int) string {
+			return filepath.Join(modelDir, fmt.Sprintf("%s - %s - 0001.jpg", postID, postName))
 		}
-		printProgress("Downloading", 1, 1, b)
+	} else {
+		postDir := filepath.Join(modelDir, fmt.Sprintf("%s - %s", postID, postName))
+		if existing := findExistingEntry(modelDir, entryPrefix, true); existing != "" {
+			postDir = filepath.Join(modelDir, existing)
+		}
+		fmt.Println(dimText("PostDir: " + postDir)) //debug info for looking directory name.
+		checkAndCreateDir(postDir)
+		pathFor = func(i int) string {
+			return filepath.Join(postDir, fmt.Sprintf("%s - %s - %04d.jpg", postID, postName, i+1))
+		}
+	}
+
+	_, failed := downloadImages("Downloading", imagesFound, pathFor)
+	if failed > 0 {
+		recordFailure(albumURL, fmt.Errorf("%d of %d images failed", failed, len(imagesFound)))
+	} else {
+		runStats.downloaded++
 		if db, err := getModelDB(modelName); err == nil {
-			defer db.Close()
 			markDownloaded(db, "candid", postID, postName)
+			db.Close()
 		}
-		delay := getDownloadDelay()
-		if delay > 0 {
-			time.Sleep(delay)
-		}
-		//fmt.Println("Done!")
-		fmt.Println()
-		return
 	}
-
-	postDir := filepath.Join(modelDir, fmt.Sprintf("%s - %s", postID, postName))
-	fmt.Println("PostDir:", postDir) //debug info for looking directory name.
-	checkAndCreateDir(postDir)
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	total := len(imagesFound)
-	sem := make(chan struct{}, 5) // limit to 5 simultaneous downloads
-
-	completed := 0
-	var totalBytes int64
-
-	printProgress("Downloading", 0, total, 0)
-	delay := getDownloadDelay()
-	for i, imageURL := range imagesFound {
-		sem <- struct{}{} // acquire slot before spawning
-		if i > 0 && delay > 0 {
-			time.Sleep(delay) // delay between download starts
-		}
-		wg.Add(1)
-		go func(i int, imageURL string) {
-			defer wg.Done()
-			defer func() { <-sem }() // release slot when finished
-			
-			imageOutput := filepath.Join(postDir, fmt.Sprintf("%s - %s - %04d.jpg", postID, postName, i+1))
-			b, err := saveImage(imageURL, imageOutput)
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				fmt.Printf("\r%s\rError: [%04d/%04d] — %v\n", strings.Repeat(" ", 85), i+1, total, err)
-			} else {
-				totalBytes += b
-			}
-			completed++
-			printProgress("Downloading", completed, total, totalBytes)
-		}(i, imageURL)
-	}
-
-	wg.Wait()
-	if db, err := getModelDB(modelName); err == nil {
-		defer db.Close()
-		markDownloaded(db, "candid", postID, postName)
-	}
-	if delay > 0 {
+	if delay := getDownloadDelay(); delay > 0 {
 		time.Sleep(delay)
 	}
 	//fmt.Println("Done!")
@@ -334,7 +322,11 @@ func downloadBlogPost(postURL string, downloadsDir string, currIndex, totalCount
 }
 
 func downloadGroupThread(threadURL string, downloadsDir string) {
-	rawBytes := getContents(threadURL)
+	rawBytes, err := getContentsE(threadURL)
+	if err != nil {
+		recordFailure(threadURL, err)
+		return
+	}
 
 	parts := strings.Split(strings.TrimSuffix(threadURL, "/"), "/")
 	groupName := "group"
@@ -355,16 +347,16 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 	}
 	threadTitle = truncateName(threadTitle, 60)
 
-	threadDir := fmt.Sprintf("%s/groups/%s/%s - %s", downloadsDir, groupName, threadID, threadTitle)
+	threadDir := filepath.Join(downloadsDir, "groups", groupName, threadID+" - "+threadTitle)
 
 	buckets := getAllGroupThreadImageBuckets(threadURL)
 	if len(buckets) == 0 {
-		fmt.Printf("Group thread %s/%s — no images found, skipping\n", groupName, threadID)
+		fmt.Println(dimText(fmt.Sprintf("Group thread %s/%s — no images found, skipping", groupName, threadID)))
 		return
 	}
 
-	fmt.Printf("Group thread %s/%s (%s) — %d post(s) with images\n", groupName, threadID, threadTitle, len(buckets))
-	fmt.Println("ThreadDir:", threadDir) //debug info for looking directory name.
+	fmt.Println(itemText(fmt.Sprintf("Group thread %s/%s (%s) — %d post(s) with images", groupName, threadID, threadTitle, len(buckets))))
+	fmt.Println(dimText("ThreadDir: " + threadDir)) //debug info for looking directory name.
 	checkAndCreateDir(threadDir)
 
 	existingEntries, _ := os.ReadDir(threadDir)
@@ -377,33 +369,31 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 		commentSnippet := truncateName(sanitizeName(bucket.CommentText), 60)
 
 		if bucket.CommentID != "" {
-			db, dbErr := getGroupDB()
-			if dbErr == nil {
-				if isDownloaded(db, "group_comment", bucket.CommentID) {
-					db.Close()
-					fmt.Printf("[skip] Group thread %s/%s — comment %s already in database\n", groupName, threadID, bucket.CommentID)
+			if db, err := getGroupDB(); err == nil {
+				done := isDownloaded(db, "group_comment", bucket.CommentID)
+				db.Close()
+				if done {
+					printSkip("", fmt.Sprintf("[skip] Group thread %s/%s — comment %s already in database", groupName, threadID, bucket.CommentID))
 					continue
 				}
 			}
 
+			// Only treat the comment as done if every image is already on
+			// disk; a partially downloaded comment fetches the rest.
 			prefix := bucket.CommentID + " - "
-			alreadyOnDisk := false
+			onDisk := 0
 			for _, e := range existingEntries {
-				if strings.HasPrefix(e.Name(), prefix) {
-					alreadyOnDisk = true
-					break
+				if strings.HasPrefix(e.Name(), prefix) && !strings.HasSuffix(e.Name(), ".part") {
+					onDisk++
 				}
 			}
-			if alreadyOnDisk {
-				fmt.Printf("[skip] Group thread %s/%s — comment %s already on disk\n", groupName, threadID, bucket.CommentID)
-				if dbErr == nil {
+			if onDisk >= len(bucket.Images) {
+				printSkip("", fmt.Sprintf("[skip] Group thread %s/%s — comment %s already on disk", groupName, threadID, bucket.CommentID))
+				if db, err := getGroupDB(); err == nil {
 					markDownloaded(db, "group_comment", bucket.CommentID, commentSnippet)
 					db.Close()
 				}
 				continue
-			}
-			if dbErr == nil {
-				db.Close()
 			}
 		}
 
@@ -414,69 +404,21 @@ func downloadGroupThread(threadURL string, downloadsDir string) {
 			baseName = fmt.Sprintf("%s - %s", bucket.CommentID, bucket.Username)
 		}
 
-		total := len(bucket.Images)
-		if total == 1 {
-			printProgress(baseName, 0, 1, 0)
-			imageOutput := fmt.Sprintf("%s/%s - 0001.jpg", threadDir, baseName)
-			b, err := saveImage(bucket.Images[0], imageOutput)
-			if err != nil {
-				fmt.Printf("\r%s\rError: %s [0001/0001] — %v\n", strings.Repeat(" ", 85), baseName, err)
-				continue
-			}
-			printProgress(baseName, 1, 1, b)
+		_, failed := downloadImages(baseName, bucket.Images, func(i int) string {
+			return filepath.Join(threadDir, fmt.Sprintf("%s - %04d.jpg", baseName, i+1))
+		})
+		if failed > 0 {
+			recordFailure(threadURL+" comment "+bucket.CommentID, fmt.Errorf("%d of %d images failed", failed, len(bucket.Images)))
+		} else {
+			runStats.downloaded++
 			if bucket.CommentID != "" {
 				if db, err := getGroupDB(); err == nil {
-					defer db.Close()
 					markDownloaded(db, "group_comment", bucket.CommentID, commentSnippet)
+					db.Close()
 				}
 			}
-			delay := getDownloadDelay()
-			if delay > 0 {
-				time.Sleep(delay)
-			}
-			continue
 		}
-
-		var wg sync.WaitGroup
-		var mu sync.Mutex
-		completed := 0
-		var totalBytes int64
-		
-		sem := make(chan struct{}, 5) // limit to 5 simultaneous downloads
-		
-		printProgress(baseName, 0, total, 0)
-		delay := getDownloadDelay()
-		for i, imageURL := range bucket.Images {
-			sem <- struct{}{} // acquire slot before spawning
-			if i > 0 && delay > 0 {
-				time.Sleep(delay) // delay between download starts
-			}
-			wg.Add(1)
-			go func(i int, imageURL string) {
-				defer wg.Done()
-				defer func() { <-sem }() // release slot when finished
-				
-				imageOutput := fmt.Sprintf("%s/%s - %04d.jpg", threadDir, baseName, i+1)
-				b, err := saveImage(imageURL, imageOutput)
-				mu.Lock()
-				defer mu.Unlock()
-				if err != nil {
-					fmt.Printf("\r%s\rError: %s [%04d/%04d] — %v\n", strings.Repeat(" ", 85), baseName, i+1, total, err)
-				} else {
-					totalBytes += b
-				}
-				completed++
-				printProgress(baseName, completed, total, totalBytes)
-			}(i, imageURL)
-		}
-		wg.Wait()
-		if bucket.CommentID != "" {
-			if db, err := getGroupDB(); err == nil {
-				defer db.Close()
-				markDownloaded(db, "group_comment", bucket.CommentID, commentSnippet)
-			}
-		}
-		if delay > 0 {
+		if delay := getDownloadDelay(); delay > 0 {
 			time.Sleep(delay)
 		}
 	}
@@ -492,11 +434,77 @@ func extractModelFromURL(urlStr string) string {
 	return ""
 }
 
+// The kinds of page the scraper handles; see routeFor.
+const (
+	routeGroupThread = "group thread"
+	routeVideo       = "video"
+	routeModelVideos = "model videos"
+	routeAlbum       = "album"
+	routePhotos      = "photos listing"
+	routeModelBlog   = "model blog"
+	routeBlogPost    = "blog post"
+	routeProfile     = "model profile"
+)
+
+// routeFor works out which kind of page a URL is, or returns "" when it isn't
+// a suicidegirls.com page the scraper handles. Unrecognised URLs used to be
+// swept as a model profile, so a typo produced a confusing run.
+func routeFor(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
+		return ""
+	}
+	if host := strings.ToLower(u.Hostname()); host != "www.suicidegirls.com" && host != "suicidegirls.com" {
+		return ""
+	}
+
+	p := u.Path
+	trimmed := strings.TrimSuffix(p, "/")
+	isModel := strings.Contains(p, "/girls/") || strings.Contains(p, "/members/")
+	switch {
+	case strings.Contains(p, "/groups/") && strings.Contains(p, "/thread/"):
+		return routeGroupThread
+	case strings.Contains(p, "/videos/") && !isModel:
+		return routeVideo
+	case isModel && strings.HasSuffix(trimmed, "/videos"):
+		return routeModelVideos
+	case strings.Contains(p, "/album/"):
+		return routeAlbum
+	case strings.Contains(p, "/photos"):
+		return routePhotos
+	case isModel && strings.HasSuffix(trimmed, "/blog"):
+		return routeModelBlog
+	case strings.Contains(p, "/blog/") && !strings.HasSuffix(trimmed, "/blog"):
+		return routeBlogPost
+	}
+	if _, _, ok := profileBase(rawURL); ok {
+		return routeProfile
+	}
+	return ""
+}
+
+// profileBase returns the clean profile URL (no query or trailing slash) and
+// model name for a "/girls/<name>/" or "/members/<name>/" URL.
+func profileBase(rawURL string) (string, string, bool) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", "", false
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) != 2 || (parts[0] != "girls" && parts[0] != "members") || parts[1] == "" {
+		return "", "", false
+	}
+	return fmt.Sprintf("%s://%s/%s/%s", u.Scheme, u.Host, parts[0], parts[1]), parts[1], true
+}
+
 func main() {
 	err := godotenv.Load()
 	if err != nil {
 		panic(err)
 	}
+	initColor()
+	showSkips = !strings.EqualFold(strings.TrimSpace(os.Getenv("SHOW_SKIPS")), "off")
+	start := time.Now()
 
 	downloadsDir := os.Getenv("DOWNLOADSDIR")
 	args := os.Args
@@ -504,42 +512,55 @@ func main() {
 		panic("usage: SGo-Scraper <url> [-z]")
 	}
 
-	albumURL := args[1]
+	albumURL := strings.TrimSpace(args[1])
 	finalizeWithZip := args[len(args)-1] == "-z"
 
-	fmt.Println("[" + time.Now().Format("2006-01-02 15:04:05") + "]")
-	fmt.Println("URL:", albumURL)
+	fmt.Println(dimText("[" + time.Now().Format("2006-01-02 15:04:05") + "]"))
+	fmt.Println("URL:", itemText(albumURL))
+
+	route := routeFor(albumURL)
+	if route == "" {
+		fmt.Println(errorText("Error: this isn't a SuicideGirls URL the scraper handles."))
+		fmt.Println("Use a model profile, photos, album, videos, blog or group thread URL on www.suicidegirls.com.")
+		os.Exit(exitBadURL)
+	}
+
 	modelName := extractModelFromURL(albumURL)
 	if modelName != "" {
-		fmt.Println("MODEL:", modelName)
-		fmt.Println("ModelDir:", filepath.Join(downloadsDir, modelName))
+		fmt.Println("MODEL:", headingText(modelName))
+		fmt.Println(dimText("ModelDir: " + filepath.Join(downloadsDir, modelName)))
 	}
 	fmt.Println()
 
+	if err := checkLogin(); err != nil {
+		fmt.Println(errorText(fmt.Sprint("Error: ", err)))
+		fmt.Println("Update the cookies in .env (see README), or set LOGIN_CHECK=off in .env to skip this check.")
+		os.Exit(exitLoginFailed)
+	}
+
 	checkAndCreateDir(downloadsDir)
 
-	switch {
-	case strings.Contains(albumURL, "/groups/") && strings.Contains(albumURL, "/thread/"):
+	switch route {
+	case routeGroupThread:
 		downloadGroupThread(albumURL, downloadsDir)
 
-	case strings.Contains(albumURL, "/videos/") && !strings.Contains(albumURL, "/girls/") && !strings.Contains(albumURL, "/members/"):
+	case routeVideo:
 		downloadVideoPost(albumURL, downloadsDir, "", 1, 1)
 
-	case (strings.Contains(albumURL, "/girls/") || strings.Contains(albumURL, "/members/")) && strings.HasSuffix(strings.TrimSuffix(albumURL, "/"), "/videos"):
-		modelName := extractModelFromURL(albumURL)
+	case routeModelVideos:
 		videoLinks := getAllVideoLinks(strings.TrimSuffix(albumURL, "/") + "/")
-		fmt.Println("Found", len(videoLinks), "Videos")
+		printHeading(fmt.Sprintf("Found %d Videos", len(videoLinks)))
 		for idx, link := range videoLinks {
 			downloadVideoPost(link, downloadsDir, modelName, idx+1, len(videoLinks))
 		}
 		if modelName != "" {
-			fmt.Printf("%s Finished Downloading...\n", modelName)
+			printFinished(modelName)
 		}
 
-	case strings.Contains(albumURL, "/album/"):
+	case routeAlbum:
 		downloadAlbum(albumURL, downloadsDir, finalizeWithZip, false, 1, 1)
 
-	case strings.Contains(albumURL, "/photos"):
+	case routePhotos:
 		photoParts := strings.Split(strings.TrimSuffix(albumURL, "/"), "/")
 		photoModel := ""
 		for i, p := range photoParts {
@@ -554,46 +575,41 @@ func main() {
 		if isCandid {
 			heading = "Candid Posts"
 		}
-		fmt.Printf("Found %d %s\n", len(albumLinks), heading)
+		printHeading(fmt.Sprintf("Found %d %s", len(albumLinks), heading))
 		for idx, link := range albumLinks {
 			downloadAlbum(link, downloadsDir, finalizeWithZip, isCandid, idx+1, len(albumLinks))
 		}
 		if photoModel != "" {
-			fmt.Printf("%s Finished Downloading...\n", titleCaseModelName(photoModel))
+			printFinished(titleCaseModelName(photoModel))
 		}
 
-	case (strings.Contains(albumURL, "/girls/") || strings.Contains(albumURL, "/members/")) && strings.HasSuffix(strings.TrimSuffix(albumURL, "/"), "/blog"):
-		modelName := extractModelFromURL(albumURL)
+	case routeModelBlog:
 		blogLinks := getAllBlogLinks(strings.TrimSuffix(albumURL, "/"), modelName)
-		fmt.Println("Found", len(blogLinks), "Blog Posts")
+		printHeading(fmt.Sprintf("Found %d Blog Posts", len(blogLinks)))
 		for idx, link := range blogLinks {
 			downloadBlogPost(link, downloadsDir, idx+1, len(blogLinks))
 		}
 		if modelName != "" {
-			fmt.Printf("%s Finished Downloading...\n", modelName)
+			printFinished(modelName)
 		}
 
-	case strings.Contains(albumURL, "/blog/") && !strings.HasSuffix(strings.TrimSuffix(albumURL, "/"), "/blog"):
+	case routeBlogPost:
 		downloadBlogPost(albumURL, downloadsDir, 1, 1)
 
-	default:
-		parts := strings.Split(strings.TrimSuffix(albumURL, "/"), "/")
-		modelName := parts[len(parts)-1]
-		base := strings.TrimSuffix(albumURL, "/")
-		normalizedModelName := titleCaseModelName(modelName)
-
+	case routeProfile:
+		base, profileModel, _ := profileBase(albumURL)
 		seen := map[string]bool{}
 
-		photosetLinks := getAllAlbumLinks(base+"/photos/view/photosets/", modelName)
-		fmt.Println("Found", len(photosetLinks), "Photosets")
+		photosetLinks := getAllAlbumLinks(base+"/photos/view/photosets/", profileModel)
+		printHeading(fmt.Sprintf("Found %d Photosets", len(photosetLinks)))
 		for idx, link := range photosetLinks {
 			seen[link] = true
 			downloadAlbum(link, downloadsDir, finalizeWithZip, false, idx+1, len(photosetLinks))
 		}
 
 		fmt.Println()
-		candidLinks := getAllAlbumLinks(base+"/photos/view/candids/", modelName)
-		fmt.Println("Found", len(candidLinks), "Candid Posts")
+		candidLinks := getAllAlbumLinks(base+"/photos/view/candids/", profileModel)
+		printHeading(fmt.Sprintf("Found %d Candid Posts", len(candidLinks)))
 		for idx, link := range candidLinks {
 			if seen[link] {
 				continue
@@ -604,18 +620,18 @@ func main() {
 
 		fmt.Println()
 		videoLinks := getAllVideoLinks(base + "/videos/")
-		fmt.Println("Found", len(videoLinks), "Videos")
+		printHeading(fmt.Sprintf("Found %d Videos", len(videoLinks)))
 		for idx, link := range videoLinks {
 			if seen[link] {
 				continue
 			}
 			seen[link] = true
-			downloadVideoPost(link, downloadsDir, modelName, idx+1, len(videoLinks))
+			downloadVideoPost(link, downloadsDir, profileModel, idx+1, len(videoLinks))
 		}
 
 		fmt.Println()
-		blogLinks := getAllBlogLinks(base+"/blog/", modelName)
-		fmt.Println("Found", len(blogLinks), "Blog Posts")
+		blogLinks := getAllBlogLinks(base+"/blog/", profileModel)
+		printHeading(fmt.Sprintf("Found %d Blog Posts", len(blogLinks)))
 		for idx, link := range blogLinks {
 			if seen[link] {
 				continue
@@ -625,7 +641,19 @@ func main() {
 		}
 
 		fmt.Println()
-		fmt.Printf("%s Finished Downloading...\n", normalizedModelName)
+		printFinished(titleCaseModelName(profileModel))
+	}
+
+	fmt.Println()
+	printSummary(time.Since(start))
+
+	if len(failedItems) > 0 {
+		fmt.Println()
+		fmt.Println(errorText(fmt.Sprintf("%d item(s) failed and were not marked as downloaded; re-run to retry them:", len(failedItems))))
+		for _, f := range failedItems {
+			fmt.Println(errorText("  - " + f))
+		}
+		os.Exit(exitSomeFailed)
 	}
 }
 
@@ -649,8 +677,15 @@ func printProgress(prefix string, completed, total int, totalBytes int64) {
 		bar = strings.Repeat(" ", width)
 	}
 
+	// The bar is cyan while downloading and turns green when it's full.
+	if completed == total {
+		bar = okText(bar)
+	} else {
+		bar = paint(ansiCyan, bar)
+	}
+
 	sizeMB := float64(totalBytes) / 1024 / 1024
-	fmt.Printf("\r%s: [%s] %d/%d (%d%%) | %.2f MB", prefix, bar, completed, total, int(percent*100), sizeMB)
+	fmt.Printf("\r%s: [%s] %d/%d (%d%%) | %s", prefix, bar, completed, total, int(percent*100), dimText(fmt.Sprintf("%.2f MB", sizeMB)))
 	if completed == total {
 		fmt.Println()
 	}
